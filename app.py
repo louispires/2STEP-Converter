@@ -1,6 +1,9 @@
 import asyncio
+import json
 import shutil
 import subprocess
+import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -15,11 +18,30 @@ executor = ThreadPoolExecutor(max_workers=2)
 
 UPLOAD_DIR = Path("/app/uploads")
 OUTPUT_DIR = Path("/app/output")
+JOBS_FILE = Path("/app/output/jobs.json")
 UPLOAD_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-jobs: dict = {}
+_lock = threading.Lock()
 ALLOWED = {".stl", ".3mf", ".obj", ".amf", ".igs", ".iges"}
+
+
+def _load_jobs() -> dict:
+    if JOBS_FILE.exists():
+        try:
+            with open(JOBS_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def _save_jobs(jobs: dict) -> None:
+    with open(JOBS_FILE, "w") as f:
+        json.dump(jobs, f)
+
+
+jobs: dict = _load_jobs()
 
 
 def _convert(job_id: str, input_path: Path, output_path: Path) -> None:
@@ -31,7 +53,9 @@ def _convert(job_id: str, input_path: Path, output_path: Path) -> None:
             timeout=300,
             stdin=subprocess.DEVNULL,
         )
-        if result.returncode == 0 and output_path.exists():
+        # Script exits non-zero due to EOFError on "Press Enter to exit" prompt —
+        # use output file existence as the success signal instead.
+        if output_path.exists():
             jobs[job_id]["status"] = "done"
         else:
             jobs[job_id]["status"] = "error"
@@ -42,11 +66,28 @@ def _convert(job_id: str, input_path: Path, output_path: Path) -> None:
     except Exception as exc:
         jobs[job_id]["status"] = "error"
         jobs[job_id]["error"] = str(exc)
+    finally:
+        with _lock:
+            _save_jobs(jobs)
 
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse(request, "index.html")
+
+
+@app.get("/jobs")
+async def list_jobs():
+    sorted_jobs = sorted(jobs.items(), key=lambda x: x[1].get("created_at", 0), reverse=True)
+    return [
+        {
+            "job_id": jid,
+            "filename": j["filename"],
+            "status": j["status"],
+            "error": j["error"],
+        }
+        for jid, j in sorted_jobs
+    ]
 
 
 @app.post("/upload")
@@ -62,12 +103,15 @@ async def upload(file: UploadFile = File(...)):
     with open(input_path, "wb") as f:
         shutil.copyfileobj(file.file, f)
 
-    jobs[job_id] = {
-        "status": "processing",
-        "filename": file.filename,
-        "output": str(output_path),
-        "error": None,
-    }
+    with _lock:
+        jobs[job_id] = {
+            "status": "processing",
+            "filename": file.filename,
+            "output": str(output_path),
+            "error": None,
+            "created_at": time.time(),
+        }
+        _save_jobs(jobs)
 
     loop = asyncio.get_running_loop()
     loop.run_in_executor(executor, _convert, job_id, input_path, output_path)

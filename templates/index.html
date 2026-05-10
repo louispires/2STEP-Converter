@@ -184,6 +184,24 @@
         files: [],
         dragging: false,
 
+        async init() {
+          try {
+            const res = await fetch('/jobs');
+            const data = await res.json();
+            this.files = data.map(j => ({
+              id: j.job_id,
+              job_id: j.job_id,
+              name: j.filename,
+              ext: j.filename.split('.').pop().toLowerCase(),
+              status: j.status,
+              error: j.error,
+            }));
+            this.files
+              .filter(f => f.status === 'processing')
+              .forEach(f => this.poll(f.id, f.job_id));
+          } catch { /* server not ready yet */ }
+        },
+
         handleDrop(e) {
           this.dragging = false;
           Array.from(e.dataTransfer.files).forEach(f => this.enqueue(f));
