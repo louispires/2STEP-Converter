@@ -4,13 +4,13 @@
 
 ![Screenshot](screenshot.png)
 
-![Platform](https://img.shields.io/badge/platform-Windows-blue)
+![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-blue)
 ![Python](https://img.shields.io/badge/python-3.12-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 ---
 
-The name has a deliberate double meaning. **"to STEP"** - whatever format you throw at it, the output is always a clean STEP file ready to open in any CAD application. **"two steps"** - because that is genuinely all it takes: drop your files into the `models\` folder and double-click `2STEP-Converter.bat`. No command line, no configuration, no manual conversion pipeline.
+The name has a deliberate double meaning. **"to STEP"** - whatever format you throw at it, the output is always a clean STEP file ready to open in any CAD application. **"two steps"** - because that is genuinely all it takes: drop your files into the `models/` folder and run the launcher for your platform. No command line, no configuration, no manual conversion pipeline.
 
 STL, 3MF, OBJ, AMF, IGES - all of these end up as the same problem: a mesh or surface description that needs to become a clean, usable solid. This tool handles all of them the same way, using the same pipeline that FreeCAD uses internally.
 
@@ -34,14 +34,17 @@ Most online converters wrap the mesh as-is into a STEP container, leaving you wi
 
 ### Batch mode
 
-1. Drop your files into the `models\` folder
-2. Double-click `2STEP-Converter.bat`
+1. Drop your files into the `models/` folder
+2. Run the launcher for your platform:
+   - **Windows:** double-click `2STEP-Converter.bat`
+   - **macOS / Linux:** `./2STEP-Converter.sh` (make executable once with `chmod +x 2STEP-Converter.sh`)
 3. Output `.stp` files appear in the same folder
 
 **Supported input formats:** `.stl` `.3mf` `.obj` `.amf` `.igs` `.iges`
 
 ### Single file
 
+**Windows**
 ```bat
 2STEP-Converter.bat path\to\model.stl
 2STEP-Converter.bat path\to\model.3mf
@@ -51,10 +54,26 @@ Most online converters wrap the mesh as-is into a STEP container, leaving you wi
 2STEP-Converter.bat path\to\model.igs path\to\output.stp
 ```
 
+**macOS / Linux**
+```sh
+./2STEP-Converter.sh path/to/model.stl
+./2STEP-Converter.sh path/to/model.3mf
+./2STEP-Converter.sh path/to/model.obj
+./2STEP-Converter.sh path/to/model.amf
+./2STEP-Converter.sh path/to/model.igs
+./2STEP-Converter.sh path/to/model.igs path/to/output.stp
+```
+
 ### Tolerance option
 
+**Windows**
 ```bat
 2STEP-Converter.bat --tolerance 0.005 model.stl
+```
+
+**macOS / Linux**
+```sh
+./2STEP-Converter.sh --tolerance 0.005 model.stl
 ```
 
 Default tolerance is `0.01`. Lower = tighter seams, slower processing. Increase if sewing fails on coarse meshes.
@@ -63,7 +82,7 @@ Default tolerance is `0.01`. Lower = tighter seams, slower processing. Increase 
 
 ## First Run
 
-On first launch the bat file automatically downloads everything needed:
+On first launch the launcher automatically downloads everything needed:
 
 | Download | Size | Purpose |
 |----------|------|---------|
@@ -74,9 +93,15 @@ On first launch the bat file automatically downloads everything needed:
 
 The launcher checks for an existing environment in this order:
 
-1. `lib\` next to the script - used automatically if present (portable mode)
-2. `%LOCALAPPDATA%\STLtoSTP` - used automatically if present
+1. `lib/` next to the script - used automatically if present (portable mode)
+2. Platform default - used automatically if present
 3. Neither found - you are asked where to install
+
+| Platform | Default install path |
+|----------|---------------------|
+| Windows | `%LOCALAPPDATA%\STLtoSTP` |
+| macOS | `~/Library/Application Support/STLtoSTP` |
+| Linux | `~/.local/share/STLtoSTP` (respects `$XDG_DATA_HOME`) |
 
 ### Windows 260-character path limit
 
@@ -93,7 +118,7 @@ To enable long paths manually in an elevated PowerShell:
 Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name LongPathsEnabled -Value 1
 ```
 
-Then reboot.
+Then reboot. This limitation does not apply to macOS or Linux.
 
 ---
 
@@ -131,7 +156,7 @@ All tunable constants live in `config.py`. If the file is missing it is created 
 
 ## Requirements
 
-- Windows 11 (tested)
+- Windows 10/11, macOS (Intel & Apple Silicon), or Linux (x86_64 & ARM64)
 - Internet connection on first run only
 - ~6 GB free disk space
 
@@ -142,11 +167,12 @@ Converted STEP files have been tested in **Plasticity** and import correctly.
 ## Project Structure
 
 ```
-2STEP-Converter.bat       - launcher: auto-setup + run
-2STEP-Converter.py        - converter script
+2STEP-Converter.bat       - launcher for Windows: auto-setup + run
+2STEP-Converter.sh        - launcher for macOS / Linux: auto-setup + run
+converter.py              - converter script
 config.py                 - tunable constants
-models\                   - drop input files here (.stl .3mf .obj .amf .igs .iges)
-lib\                      - auto-created: portable Python environment
+models/                   - drop input files here (.stl .3mf .obj .amf .igs .iges)
+lib/                      - auto-created: portable Python environment
 ```
 
 ---

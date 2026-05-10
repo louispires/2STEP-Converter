@@ -97,4 +97,4 @@ if errorlevel 1 (
 
 
 :run
-"!_PY!" "%~dp02STEP-Converter.py" %*
+"!_PY!" "%~dp0converter.py" %*
