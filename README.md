@@ -1,5 +1,11 @@
 # 2STEP-Converter
 
+<img width="1274" height="1011" alt="image" src="https://github.com/user-attachments/assets/41cb9292-cbc9-469f-8897-23cfe42e17b3" />
+
+Added Dockerfile and Simple UI for running this remotely on a Server with Docker
+
+---
+
 > Batch-converts **STL, 3MF, OBJ, AMF, and IGES** files to clean STEP solids using OpenCASCADE Technology - the same engine that powers FreeCAD, CATIA, and other professional CAD tools.
 
 ![Screenshot](screenshot.png)
