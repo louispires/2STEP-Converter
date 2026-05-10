@@ -217,7 +217,10 @@
           const allowed = ['stl', '3mf', 'obj', 'amf', 'igs', 'iges'];
           if (!allowed.includes(ext)) return;
 
-          const id = 'local-' + crypto.randomUUID();
+          const id = 'local-' + 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+            const r = Math.random() * 16 | 0;
+            return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+          });
           this.files.unshift({ id, job_id: null, name: file.name, ext, status: 'uploading', error: null });
           this.upload(id, file);
         },
