@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>2STEP Converter</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
+  <style>
+    body { font-family: 'Inter', sans-serif; }
+    [x-cloak] { display: none !important; }
+  </style>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            surface: '#0d0d14',
+            card: '#13131f',
+            border: '#1e1e30',
+          }
+        }
+      }
+    }
+  </script>
+</head>
+
+<body class="bg-[#0d0d14] text-slate-100 min-h-screen antialiased" x-data="converter()">
+
+  <!-- Header -->
+  <header class="border-b border-[#1e1e30] px-6 py-4">
+    <div class="max-w-3xl mx-auto flex items-center gap-3">
+      <div class="w-8 h-8 rounded-lg bg-violet-600 flex items-center justify-center flex-shrink-0">
+        <svg class="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M7 21a4 4 0 01-4-4V5a2 2 0 012-2h4a2 2 0 012 2v12a4 4 0 01-4 4zm0 0h12a2 2 0 002-2v-4a2 2 0 00-2-2h-2.343M11 7.343l1.657-1.657a2 2 0 012.828 0l2.829 2.829a2 2 0 010 2.828l-8.486 8.485M7 17h.01"/>
+        </svg>
+      </div>
+      <span class="font-semibold tracking-tight">2STEP Converter</span>
+      <div class="ml-auto flex items-center gap-2 text-xs text-slate-500">
+        <span class="bg-[#1e1e30] px-2 py-1 rounded-md">STL · 3MF · OBJ · AMF · IGES</span>
+        <svg class="w-3.5 h-3.5 text-slate-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M13 7l5 5m0 0l-5 5m5-5H6"/>
+        </svg>
+        <span class="bg-violet-950/60 text-violet-400 border border-violet-800/50 px-2 py-1 rounded-md">STEP</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main -->
+  <main class="max-w-3xl mx-auto px-6 py-10">
+
+    <!-- Drop Zone -->
+    <div
+      class="relative rounded-2xl border-2 border-dashed p-14 text-center cursor-pointer select-none transition-all duration-150"
+      :class="dragging
+        ? 'border-violet-500 bg-violet-950/20'
+        : 'border-[#1e1e30] hover:border-slate-600 bg-[#13131f]'"
+      @dragover.prevent="dragging = true"
+      @dragleave.prevent="dragging = false"
+      @drop.prevent="handleDrop($event)"
+      @click="$refs.input.click()"
+    >
+      <input
+        type="file" x-ref="input" class="hidden"
+        multiple accept=".stl,.3mf,.obj,.amf,.igs,.iges"
+        @change="handleFiles($event)"
+      >
+
+      <div class="flex flex-col items-center gap-4 pointer-events-none">
+        <div
+          class="w-14 h-14 rounded-xl flex items-center justify-center transition-colors duration-150"
+          :class="dragging ? 'bg-violet-900/60' : 'bg-[#1a1a2e]'"
+        >
+          <svg
+            class="w-7 h-7 transition-colors duration-150"
+            :class="dragging ? 'text-violet-400' : 'text-slate-500'"
+            fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"
+          >
+            <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"/>
+          </svg>
+        </div>
+        <div>
+          <p class="text-slate-300 font-medium">
+            Drop files here or <span class="text-violet-400">browse</span>
+          </p>
+          <p class="text-slate-600 text-sm mt-1">Converts mesh files to clean STEP solids via OpenCASCADE</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- File List -->
+    <div x-show="files.length > 0" x-cloak x-transition:enter="transition ease-out duration-200" x-transition:enter-start="opacity-0 translate-y-1" x-transition:enter-end="opacity-100 translate-y-0" class="mt-6">
+
+      <!-- List header -->
+      <div class="flex items-center justify-between mb-3">
+        <span class="text-xs font-medium text-slate-500 uppercase tracking-widest">Queue</span>
+        <button
+          x-show="files.some(f => ['done','error'].includes(f.status))"
+          @click="clearCompleted()"
+          class="text-xs text-slate-600 hover:text-slate-400 transition-colors"
+        >Clear completed</button>
+      </div>
+
+      <!-- Items -->
+      <div class="space-y-2">
+        <template x-for="file in files" :key="file.id">
+          <div
+            class="flex items-center gap-3 px-4 py-3 rounded-xl border transition-colors duration-200"
+            :class="{
+              'bg-[#13131f] border-[#1e1e30]': file.status !== 'done',
+              'bg-emerald-950/20 border-emerald-900/40': file.status === 'done'
+            }"
+          >
+            <!-- Ext badge -->
+            <div
+              class="w-10 h-10 rounded-lg flex items-center justify-center text-[10px] font-bold flex-shrink-0 tracking-wide"
+              :class="{
+                'bg-sky-900/40 text-sky-400':     file.status === 'uploading' || file.status === 'processing',
+                'bg-emerald-900/40 text-emerald-400': file.status === 'done',
+                'bg-red-900/40 text-red-400':     file.status === 'error'
+              }"
+              x-text="file.ext.toUpperCase()"
+            ></div>
+
+            <!-- Name + status -->
+            <div class="flex-1 min-w-0">
+              <p class="text-sm font-medium text-slate-200 truncate" x-text="file.name"></p>
+              <p
+                class="text-xs mt-0.5 truncate"
+                :class="{
+                  'text-sky-400':     file.status === 'uploading' || file.status === 'processing',
+                  'text-emerald-400': file.status === 'done',
+                  'text-red-400':     file.status === 'error'
+                }"
+                x-text="statusLabel(file)"
+              ></p>
+            </div>
+
+            <!-- Action area -->
+            <div class="flex-shrink-0 w-28 flex justify-end">
+
+              <!-- Spinner: uploading or processing -->
+              <div x-show="file.status === 'uploading' || file.status === 'processing'" class="flex items-center gap-2 text-sky-400 text-xs">
+                <svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                  <circle class="opacity-20" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+                  <path class="opacity-80" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+                </svg>
+                <span x-text="file.status === 'uploading' ? 'Uploading' : 'Converting'"></span>
+              </div>
+
+              <!-- Download -->
+              <button
+                x-show="file.status === 'done'"
+                @click="download(file)"
+                class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white text-xs font-medium transition-colors"
+              >
+                <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+                </svg>
+                Download .stp
+              </button>
+
+              <!-- Error -->
+              <div x-show="file.status === 'error'" class="flex items-center gap-1.5 text-red-400 text-xs">
+                <svg class="w-4 h-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                </svg>
+                <span class="truncate max-w-[80px]" :title="file.error" x-text="'Failed'"></span>
+              </div>
+
+            </div>
+          </div>
+        </template>
+      </div>
+    </div>
+
+  </main>
+
+  <script>
+    function converter() {
+      return {
+        files: [],
+        dragging: false,
+
+        handleDrop(e) {
+          this.dragging = false;
+          Array.from(e.dataTransfer.files).forEach(f => this.enqueue(f));
+        },
+
+        handleFiles(e) {
+          Array.from(e.target.files).forEach(f => this.enqueue(f));
+          e.target.value = '';
+        },
+
+        enqueue(file) {
+          const ext = file.name.split('.').pop().toLowerCase();
+          const allowed = ['stl', '3mf', 'obj', 'amf', 'igs', 'iges'];
+          if (!allowed.includes(ext)) return;
+
+          const id = 'local-' + crypto.randomUUID();
+          this.files.unshift({ id, job_id: null, name: file.name, ext, status: 'uploading', error: null });
+          this.upload(id, file);
+        },
+
+        async upload(id, file) {
+          try {
+            const form = new FormData();
+            form.append('file', file);
+            const res = await fetch('/upload', { method: 'POST', body: form });
+            if (!res.ok) {
+              const txt = await res.text();
+              throw new Error(txt);
+            }
+            const { job_id } = await res.json();
+            const item = this.files.find(f => f.id === id);
+            if (item) {
+              item.job_id = job_id;
+              item.status = 'processing';
+              this.poll(id, job_id);
+            }
+          } catch (err) {
+            const item = this.files.find(f => f.id === id);
+            if (item) { item.status = 'error'; item.error = err.message; }
+          }
+        },
+
+        async poll(id, job_id) {
+          try {
+            const res = await fetch(`/status/${job_id}`);
+            const data = await res.json();
+            const item = this.files.find(f => f.id === id);
+            if (item) { item.status = data.status; item.error = data.error; }
+            if (data.status === 'processing') setTimeout(() => this.poll(id, job_id), 2000);
+          } catch {
+            setTimeout(() => this.poll(id, job_id), 3000);
+          }
+        },
+
+        download(file) {
+          const a = document.createElement('a');
+          a.href = `/download/${file.job_id}`;
+          a.download = file.name.replace(/\.[^.]+$/, '.stp');
+          a.click();
+        },
+
+        statusLabel(file) {
+          if (file.status === 'uploading')   return 'Uploading…';
+          if (file.status === 'processing')  return 'Converting to STEP…';
+          if (file.status === 'done')        return 'Ready to download';
+          if (file.status === 'error')       return file.error || 'Conversion failed';
+          return file.status;
+        },
+
+        clearCompleted() {
+          this.files = this.files.filter(f => f.status === 'uploading' || f.status === 'processing');
+        }
+      };
+    }
+  </script>
+
+</body>
+</html>

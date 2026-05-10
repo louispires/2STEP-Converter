@@ -3,9 +3,10 @@ services:
     build: .
     image: 2step-converter:latest
     container_name: 2step-converter
+    ports:
+      - "8000:8000"
     volumes:
-      # Unraid: change left side to your share path, e.g. /mnt/user/3dmodels
-      - ./models:/app/models
-    restart: "no"
-    # Optional: pass --tolerance flag, e.g.:
-    # command: ["--tolerance", "0.005"]
+      # Persist converted files across restarts
+      - ./uploads:/app/uploads
+      - ./output:/app/output
+    restart: unless-stopped

@@ -1,4 +1,6 @@
 lib/
 models/
+uploads/
+output/
 __pycache__/
 config.py
