@@ -2,5 +2,6 @@ lib/
 models/
 uploads/
 output/
+static/styles.css
 __pycache__/
 config.py
