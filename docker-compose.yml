@@ -1,0 +1,11 @@
+services:
+  2step-converter:
+    build: .
+    image: 2step-converter:latest
+    container_name: 2step-converter
+    volumes:
+      # Unraid: change left side to your share path, e.g. /mnt/user/3dmodels
+      - ./models:/app/models
+    restart: "no"
+    # Optional: pass --tolerance flag, e.g.:
+    # command: ["--tolerance", "0.005"]
