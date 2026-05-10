@@ -258,7 +258,8 @@
           return file.status;
         },
 
-        clearCompleted() {
+        async clearCompleted() {
+          await fetch('/jobs/completed', { method: 'DELETE' });
           this.files = this.files.filter(f => f.status === 'uploading' || f.status === 'processing');
         }
       };

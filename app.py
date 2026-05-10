@@ -120,6 +120,16 @@ async def upload(file: UploadFile = File(...)):
     return {"job_id": job_id}
 
 
+@app.delete("/jobs/completed")
+async def clear_completed():
+    completed = [jid for jid, j in jobs.items() if j["status"] in ("done", "error")]
+    with _lock:
+        for jid in completed:
+            jobs.pop(jid, None)
+        _save_jobs(jobs)
+    return {"removed": len(completed)}
+
+
 @app.get("/status/{job_id}")
 async def status(job_id: str):
     if job_id not in jobs:
