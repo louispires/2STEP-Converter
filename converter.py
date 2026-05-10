@@ -13,9 +13,6 @@ from xml.etree import ElementTree as ET
 _CONFIG_PATH = Path(__file__).parent / "config.py"
 if not _CONFIG_PATH.exists():
     _CONFIG_PATH.write_text(
-        "GENERATE_PREVIEW    = False\n"
-        "PREVIEW_TIMEOUT     = 120\n"
-        "PREVIEW_DEFLECTION  = 1.0\n"
         "DEFAULT_TOLERANCE   = 0.01\n"
         "ANGULAR_TOLERANCE   = 1e-3\n"
         "NAME_TRIM_WIDTH     = 50\n"
@@ -38,7 +35,6 @@ from config import (
     DEFAULT_TOLERANCE, ANGULAR_TOLERANCE,
     NAME_TRIM_WIDTH, SEPARATOR_WIDTH,
     MODELS_DIR_NAME, STL_EXT, TMF_EXT, OBJ_EXT, IGS_EXT, AMF_EXT, STP_EXT, BYTES_PER_KB,
-    GENERATE_PREVIEW, PREVIEW_TIMEOUT, PREVIEW_DEFLECTION,
 )
 
 try:
@@ -255,41 +251,6 @@ except Exception as e:
     sys.exit(1)
 
 
-_PREVIEW_SCRIPT = """\
-import sys
-from OCC.Core.STEPControl import STEPControl_Reader
-from OCC.Core.IFSelect import IFSelect_RetDone
-from OCC.Core.BRepMesh import BRepMesh_IncrementalMesh
-from OCC.Display.OCCViewer import OffscreenRenderer
-from OCC.Core.V3d import V3d_XposYnegZpos
-from OCC.Core.Graphic3d import Graphic3d_NOM_STEEL
-from pathlib import Path
-reader = STEPControl_Reader()
-assert reader.ReadFile(sys.argv[1]) == IFSelect_RetDone
-reader.TransferRoots()
-shape = reader.OneShape()
-BRepMesh_IncrementalMesh(shape, float(sys.argv[3])).Perform()
-r = OffscreenRenderer(screen_size=(800, 600))
-r.View.SetProj(V3d_XposYnegZpos)
-p = Path(sys.argv[2])
-r.DisplayShape(shape, material=Graphic3d_NOM_STEEL, update=True,
-               dump_image=True, dump_image_path=str(p.parent), dump_image_filename=p.name)
-"""
-
-
-def _generate_preview(stp_path: Path, png_path: Path) -> bool:
-    import subprocess
-    try:
-        subprocess.run(
-            [sys.executable, '-c', _PREVIEW_SCRIPT,
-             str(stp_path), str(png_path), str(PREVIEW_DEFLECTION)],
-            timeout=PREVIEW_TIMEOUT,
-            capture_output=True,
-        )
-        return png_path.exists()
-    except Exception:
-        return False
-
 
 def convert(input_path: Path, output_path: Path, tolerance: float = DEFAULT_TOLERANCE):
     src = input_path.as_posix()
@@ -358,10 +319,6 @@ def convert(input_path: Path, output_path: Path, tolerance: float = DEFAULT_TOLE
         if not output_path.exists() or output_path.stat().st_size == 0:
             return False, "output file is missing or empty"
 
-        if GENERATE_PREVIEW:
-            _dot("preview")
-            _generate_preview(output_path, output_path.with_suffix('.png'))
-
         return True, output_path.stat().st_size // BYTES_PER_KB
 
     except Exception:
@@ -417,10 +374,6 @@ def main():
             print()
             if success:
                 print(f"         {G}{_trim(out_file.name)}  {info} KB{X}")
-                png_file = out_file.with_suffix('.png')
-                if png_file.exists():
-                    png_kb = png_file.stat().st_size // BYTES_PER_KB
-                    print(f"         {DIM}{_trim(png_file.name)}  {png_kb} KB{X}")
                 ok_n += 1
             else:
                 print(f"         {R}✗  {info}{X}")
@@ -455,10 +408,6 @@ def main():
     print()
     if success:
         print(f"         {G}{_trim(output_path.name)}  {info} KB{X}")
-        png_file = output_path.with_suffix('.png')
-        if png_file.exists():
-            png_kb = png_file.stat().st_size // BYTES_PER_KB
-            print(f"         {DIM}{_trim(png_file.name)}  {png_kb} KB{X}")
         print()
         print(f"  {G}{B}✓  Done{X}")
     else:
