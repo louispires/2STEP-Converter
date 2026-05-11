@@ -1,5 +1,6 @@
 import sys
 import os
+import json
 import ctypes
 import traceback
 import argparse
@@ -471,6 +472,134 @@ def _trim(name: str, width: int = NAME_TRIM_WIDTH) -> str:
     return name if len(name) <= width else name[:width - 3] + "..."
 
 
+_EST_HISTORY = Path(__file__).parent / "estimator.json"
+_EST_MIN     = 5
+_EST_POWERS  = (2, 1, 0)
+
+
+def _est_load():
+    if _EST_HISTORY.exists():
+        try:
+            data = json.loads(_EST_HISTORY.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+    return {}
+
+
+def _est_save(data):
+    try:
+        _EST_HISTORY.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _bucket_add(bucket, x, y):
+    scale  = bucket.get("scale",  x) or 1.0
+    XtX    = bucket.get("XtX",    [[0.0] * 3 for _ in range(3)])
+    Xty    = bucket.get("Xty",    [0.0] * 3)
+    sum_y2 = bucket.get("sum_y2", 0.0)
+    if x > scale:
+        r   = scale / x
+        XtX = [[XtX[i][j] * r ** (_EST_POWERS[i] + _EST_POWERS[j])
+                for j in range(3)] for i in range(3)]
+        Xty = [Xty[i] * r ** _EST_POWERS[i] for i in range(3)]
+        scale = x
+    xn  = x / scale
+    row = (xn * xn, xn, 1.0)
+    for i in range(3):
+        Xty[i] += row[i] * y
+        for j in range(3):
+            XtX[i][j] += row[i] * row[j]
+    return {"scale": scale, "XtX": XtX, "Xty": Xty, "sum_y2": sum_y2 + y * y}
+
+
+def _bucket_predict(bucket, x):
+    XtX    = bucket.get("XtX",    [[0.0] * 3 for _ in range(3)])
+    Xty    = bucket.get("Xty",    [0.0] * 3)
+    sum_y2 = bucket.get("sum_y2", 0.0)
+    scale  = bucket.get("scale",  1.0) or 1.0
+    n = int(round(XtX[2][2]))
+    if n < _EST_MIN:
+        return None, n, 0.0
+    cs = _solve3(XtX, Xty)
+    if cs is None:
+        return None, n, 0.0
+    a2, a1, a0 = cs
+    xn   = x / scale
+    pred   = max(0.5, a2 * xn * xn + a1 * xn + a0)
+    sum_y  = Xty[2]
+    ss_tot = sum_y2 - sum_y * sum_y / n
+    ss_res = (sum_y2
+              - 2 * (a2 * Xty[0] + a1 * Xty[1] + a0 * Xty[2])
+              + a2 * a2 * XtX[0][0] + a1 * a1 * XtX[1][1] + a0 * a0 * XtX[2][2]
+              + 2 * a2 * a1 * XtX[0][1] + 2 * a2 * a0 * XtX[0][2] + 2 * a1 * a0 * XtX[1][2])
+    r2 = max(0.0, 1.0 - ss_res / ss_tot) if ss_tot > 1e-10 else 1.0
+    return pred, n, r2
+
+
+def _solve3(A, b):
+    M = [A[i][:] + [b[i]] for i in range(3)]
+    for col in range(3):
+        pivot = max(range(col, 3), key=lambda r: abs(M[r][col]))
+        if abs(M[pivot][col]) < 1e-12:
+            return None
+        M[col], M[pivot] = M[pivot], M[col]
+        inv = 1.0 / M[col][col]
+        M[col] = [v * inv for v in M[col]]
+        for row in range(3):
+            if row != col:
+                f = M[row][col]
+                M[row] = [M[row][j] - f * M[col][j] for j in range(4)]
+    return [M[i][3] for i in range(3)]
+
+
+def _rec_time(fmt: str, input_kb: float, triangles, total_seconds: float):
+    data = _est_load()
+    x, y = float(input_kb), float(total_seconds)
+    data[fmt]    = _bucket_add(data.get(fmt,    {}), x, y)
+    data["_all"] = _bucket_add(data.get("_all", {}), x, y)
+    _est_save(data)
+
+
+def _est_time(input_kb: float, triangles=None, fmt=None):
+    data  = _est_load()
+    x     = float(input_kb)
+    n_all = int(round(data.get("_all", {}).get("XtX", [[0]*3]*3)[2][2]))
+    if fmt and fmt in data:
+        pred, n, r2 = _bucket_predict(data[fmt], x)
+        if pred is not None:
+            return pred, n, r2
+    if "_all" in data:
+        pred, n, r2 = _bucket_predict(data["_all"], x)
+        if pred is not None:
+            return pred, n, r2
+    return None, n_all, 0.0
+
+
+def _fmt_time(seconds: float) -> str:
+    s = int(round(seconds))
+    if s < 60:
+        return f"{s}s"
+    return f"{s // 60}m {s % 60:02d}s"
+
+
+def _show_estimate(input_kb: float, fmt: str = None) -> None:
+    est, n_samples, r2 = _est_time(input_kb, fmt=fmt)
+    if est is not None:
+        _box_row(
+            f"~{_fmt_time(est)}  estimated",
+            f"{n_samples} records · {int(r2 * 100)}%",
+            lc=Y, rc=DIM,
+        )
+    else:
+        _box_row(
+            f"learning...  {n_samples} of {_EST_MIN} conversions recorded",
+            lc=DIM,
+        )
+
+
 def convert(input_path: Path, output_path: Path, tolerance: float = DEFAULT_TOLERANCE):
     n_verts = n_tris = None
 
@@ -500,19 +629,19 @@ def convert(input_path: Path, output_path: Path, tolerance: float = DEFAULT_TOLE
             read_parts.append(f"{n_tris:,} triangles")
         if not read_parts:
             read_parts.append(f"{_count_topo(shape, TopAbs_FACE):,} faces")
-        _step_end(t, "  -  ".join(read_parts))
+        _step_end(t, "  ·  ".join(read_parts))
 
         t = _step_start("sewing")
         with quiet():
             sewn, n_free = _parallel_sew(shape, tolerance)
         if sewn.IsNull():
             _step_fail()
-            return False, "sewing failed - try a larger tolerance"
+            return False, "sewing failed, try a larger tolerance"
         n_shells = _count_topo(sewn, TopAbs_SHELL)
         sew_parts = [f"{n_shells:,} shell{'s' if n_shells != 1 else ''}"]
         if n_free:
             sew_parts.append(f"{n_free:,} free edge{'s' if n_free != 1 else ''}")
-        _step_end(t, "  -  ".join(sew_parts))
+        _step_end(t, "  ·  ".join(sew_parts))
 
         t = _step_start("fixing")
         n_faces_in = _count_topo(sewn, TopAbs_FACE)
@@ -595,8 +724,13 @@ def main():
             size_str = f"{src_kb:,} KB"
             _box_top()
             _box_row(f"[{i+1}/{n}]  {_trim(src_file.name, _BOX_CONTENT - len(size_str) - 3)}", size_str, lc=B, rc=DIM)
+            _show_estimate(src_kb, src_file.suffix.lower())
             _box_sep()
+            _t0 = time.perf_counter()
             success, info = convert(src_file, out_file, tol)
+            _elapsed = time.perf_counter() - _t0
+            if success:
+                _rec_time(src_file.suffix.lower(), src_kb, info.get("tris"), _elapsed)
             _box_sep()
             if success:
                 out_str = f"{info['kb']:,} KB"
@@ -608,7 +742,7 @@ def main():
             _box_bot()
             print()
 
-        print(f"  {DIM}{'-' * SEPARATOR_WIDTH}{X}")
+        print(f"  {DIM}{'─' * SEPARATOR_WIDTH}{X}")
         if fail_n == 0:
             print(f"  {G}{B}✓  All {ok_n} file{'s' if ok_n > 1 else ''} converted successfully{X}")
         else:
@@ -633,8 +767,13 @@ def main():
     size_str = f"{src_kb:,} KB"
     _box_top()
     _box_row(f"[1/1]  {_trim(input_path.name, _BOX_CONTENT - len(size_str) - 3)}", size_str, lc=B, rc=DIM)
+    _show_estimate(src_kb, input_path.suffix.lower())
     _box_sep()
+    _t0 = time.perf_counter()
     success, info = convert(input_path, output_path, args.tolerance)
+    _elapsed = time.perf_counter() - _t0
+    if success:
+        _rec_time(input_path.suffix.lower(), src_kb, info.get("tris"), _elapsed)
     _box_sep()
     if success:
         out_str = f"{info['kb']:,} KB"
