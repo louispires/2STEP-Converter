@@ -6,6 +6,7 @@ import argparse
 import zipfile
 import struct
 import tempfile
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from xml.etree import ElementTree as ET
@@ -82,7 +83,7 @@ try:
         from OCC.Core.IFSelect import IFSelect_RetDone, IFSelect_RetError, IFSelect_RetFail
         from OCC.Core.TopoDS import TopoDS_Shape
         from OCC.Core.TopExp import TopExp_Explorer
-        from OCC.Core.TopAbs import TopAbs_FACE, TopAbs_EDGE
+        from OCC.Core.TopAbs import TopAbs_FACE, TopAbs_EDGE, TopAbs_SHELL
 except Exception as e:
     print(f"\n  {R}[ERROR]{X} Failed to load OpenCASCADE: {e}\n")
     traceback.print_exc()
@@ -270,20 +271,34 @@ def _stl_tri_count(path: Path):
         return None
 
 
-def _topo_counts(shape):
-    result = {}
-    for key, kind in (("faces", TopAbs_FACE), ("edges", TopAbs_EDGE)):
-        exp = TopExp_Explorer(shape, kind)
-        n = 0
-        while exp.More():
-            n += 1
-            exp.Next()
-        result[key] = n
-    return result
+def _count_topo(shape, kind) -> int:
+    exp = TopExp_Explorer(shape, kind)
+    n = 0
+    while exp.More():
+        n += 1
+        exp.Next()
+    return n
 
 
-def _dot(label: str):
-    print(f"{DIM}{label}{X}", end="  ", flush=True)
+def _topo_counts(shape) -> dict:
+    return {
+        "faces": _count_topo(shape, TopAbs_FACE),
+        "edges": _count_topo(shape, TopAbs_EDGE),
+    }
+
+
+def _step_start(label: str) -> float:
+    print(f"         {DIM}{label:<10}{X}", end="", flush=True)
+    return time.perf_counter()
+
+
+def _step_end(t0: float, detail: str = "") -> None:
+    elapsed = time.perf_counter() - t0
+    time_str = f"{elapsed:.1f}s"
+    if detail:
+        print(f"  {DIM}{detail}  -  {time_str}{X}")
+    else:
+        print(f"  {DIM}{time_str}{X}")
 
 
 def _trim(name: str, width: int = NAME_TRIM_WIDTH) -> str:
@@ -293,17 +308,17 @@ def _trim(name: str, width: int = NAME_TRIM_WIDTH) -> str:
 def _stats_line(info: dict) -> str:
     in_parts = []
     if info.get("verts") is not None:
-        in_parts.append(f"{info['verts']:,} verts")
+        in_parts.append(f"{info['verts']:,} vertices")
     if info.get("tris") is not None:
-        in_parts.append(f"{info['tris']:,} tris")
+        in_parts.append(f"{info['tris']:,} triangles")
     out_parts = []
     if info.get("faces"):
         out_parts.append(f"{info['faces']:,} faces")
     if info.get("edges"):
         out_parts.append(f"{info['edges']:,} edges")
     if in_parts and out_parts:
-        return "  ·  ".join(in_parts) + "  →  " + "  ·  ".join(out_parts)
-    return "  ·  ".join(in_parts + out_parts)
+        return "  -  ".join(in_parts) + "  to  " + "  -  ".join(out_parts)
+    return "  -  ".join(in_parts + out_parts)
 
 
 def convert(input_path: Path, output_path: Path, tolerance: float = DEFAULT_TOLERANCE):
@@ -311,7 +326,7 @@ def convert(input_path: Path, output_path: Path, tolerance: float = DEFAULT_TOLE
     n_verts = n_tris = None
 
     try:
-        _dot("reading")
+        t = _step_start("reading")
         ext = input_path.suffix.lower()
         if ext == TMF_EXT:
             shape, n_verts, n_tris = _read_3mf_shape(input_path)
@@ -327,18 +342,34 @@ def convert(input_path: Path, output_path: Path, tolerance: float = DEFAULT_TOLE
                 StlAPI_Reader().Read(shape, input_path.as_posix())
             n_tris = _stl_tri_count(input_path)
         if shape.IsNull():
+            print()
             return False, "input produced an empty shape"
+        read_parts = []
+        if n_verts is not None:
+            read_parts.append(f"{n_verts:,} vertices")
+        if n_tris is not None:
+            read_parts.append(f"{n_tris:,} triangles")
+        if not read_parts:
+            read_parts.append(f"{_count_topo(shape, TopAbs_FACE):,} faces")
+        _step_end(t, "  -  ".join(read_parts))
 
-        _dot("sewing")
+        t = _step_start("sewing")
         sew = BRepBuilderAPI_Sewing(tolerance)
         sew.Add(shape)
         with quiet():
             sew.Perform()
         sewn = sew.SewedShape()
         if sewn.IsNull():
+            print()
             return False, "sewing failed - try a larger tolerance"
+        n_shells = _count_topo(sewn, TopAbs_SHELL)
+        n_free   = sew.NbFreeEdges()
+        sew_parts = [f"{n_shells:,} shell{'s' if n_shells != 1 else ''}"]
+        if n_free:
+            sew_parts.append(f"{n_free:,} free edge{'s' if n_free != 1 else ''}")
+        _step_end(t, "  -  ".join(sew_parts))
 
-        _dot("fixing")
+        t = _step_start("fixing")
         try:
             with quiet():
                 fix = ShapeFix_Shape(sewn)
@@ -348,8 +379,10 @@ def convert(input_path: Path, output_path: Path, tolerance: float = DEFAULT_TOLE
                 fixed = sewn
         except Exception:
             fixed = sewn
+        _step_end(t)
 
-        _dot("refining")
+        t = _step_start("refining")
+        n_faces_before = _count_topo(fixed, TopAbs_FACE)
         try:
             with quiet():
                 u = ShapeUpgrade_UnifySameDomain(fixed, True, True, True)
@@ -361,22 +394,27 @@ def convert(input_path: Path, output_path: Path, tolerance: float = DEFAULT_TOLE
                 raise RuntimeError
         except Exception:
             refined = fixed
+        n_faces_after = _count_topo(refined, TopAbs_FACE)
+        _step_end(t, f"{n_faces_before:,} to {n_faces_after:,} faces")
 
-        _dot("writing")
+        t = _step_start("writing")
         writer = STEPControl_Writer()
         with quiet():
             ts = writer.Transfer(refined, STEPControl_AsIs)
             ws = writer.Write(dst)
         if ts in (IFSelect_RetError, IFSelect_RetFail) or \
            ws in (IFSelect_RetError, IFSelect_RetFail):
+            print()
             return False, "STEP writer failed"
-
         if not output_path.exists() or output_path.stat().st_size == 0:
+            print()
             return False, "output file is missing or empty"
+        out_kb = output_path.stat().st_size // BYTES_PER_KB
+        _step_end(t, f"{out_kb:,} KB")
 
         topo = _topo_counts(refined)
         return True, {
-            "kb":    output_path.stat().st_size // BYTES_PER_KB,
+            "kb":    out_kb,
             "verts": n_verts,
             "tris":  n_tris,
             "faces": topo["faces"],
@@ -384,6 +422,7 @@ def convert(input_path: Path, output_path: Path, tolerance: float = DEFAULT_TOLE
         }
 
     except Exception:
+        print()
         return False, traceback.format_exc().strip()
 
 
@@ -422,21 +461,16 @@ def main():
             out_file = src_file.with_suffix(STP_EXT)
             src_kb = src_file.stat().st_size // BYTES_PER_KB
             print(f"  {B}[{i}/{n}]{X}  {_trim(src_file.name)}  {DIM}{src_kb} KB{X}")
-            print("         ", end="", flush=True)
             success, info = convert(src_file, out_file, args.tolerance)
-            print()
             if success:
                 print(f"         {G}{_trim(out_file.name)}  {info['kb']} KB{X}")
-                stats = _stats_line(info)
-                if stats:
-                    print(f"         {DIM}{stats}{X}")
                 ok_n += 1
             else:
                 print(f"         {R}✗  {info}{X}")
                 fail_n += 1
             print()
 
-        print(f"  {DIM}{'─' * SEPARATOR_WIDTH}{X}")
+        print(f"  {DIM}{'-' * SEPARATOR_WIDTH}{X}")
         if fail_n == 0:
             print(f"  {G}{B}✓  All {ok_n} file{'s' if ok_n > 1 else ''} converted successfully{X}")
         else:
@@ -459,14 +493,9 @@ def main():
 
     src_kb = input_path.stat().st_size // BYTES_PER_KB
     print(f"  {B}[1/1]{X}  {_trim(input_path.name)}  {DIM}{src_kb} KB{X}")
-    print("         ", end="", flush=True)
     success, info = convert(input_path, output_path, args.tolerance)
-    print()
     if success:
         print(f"         {G}{_trim(output_path.name)}  {info['kb']} KB{X}")
-        stats = _stats_line(info)
-        if stats:
-            print(f"         {DIM}{stats}{X}")
         print()
         print(f"  {G}{B}✓  Done{X}")
     else:
