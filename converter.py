@@ -18,7 +18,7 @@ if not _CONFIG_PATH.exists():
     _CONFIG_PATH.write_text(
         "DEFAULT_TOLERANCE   = 0.01\n"
         "ANGULAR_TOLERANCE   = 1e-3\n"
-        "NAME_TRIM_WIDTH     = 50\n"
+        "NAME_TRIM_WIDTH     = 62\n"
         "SEPARATOR_WIDTH     = 32\n"
         "BYTES_PER_KB        = 1024\n"
         "STD_OUTPUT_HANDLE   = -11\n"
@@ -101,7 +101,7 @@ _3MF_NS = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
 _STL_TRI = struct.Struct("<12fH")
 _SUPPORTED_EXTS = {STL_EXT, TMF_EXT, OBJ_EXT, AMF_EXT, IGS_EXT, ".iges"}
 
-_BOX_CONTENT = 60
+_BOX_CONTENT = 72
 _BOX_LABEL   = 10
 _BOX_TIME    = 6
 _BOX_DETAIL  = _BOX_CONTENT - _BOX_LABEL - 2 - _BOX_TIME
@@ -458,7 +458,7 @@ def _step_end(t0: float, detail: str = "") -> None:
     elapsed = time.perf_counter() - t0
     if len(detail) > _BOX_DETAIL:
         detail = detail[:_BOX_DETAIL - 3] + "..."
-    time_str = f"{elapsed:.1f}s"
+    time_str = _fmt_time(elapsed)
     print(f"{X}{C}{detail:<{_BOX_DETAIL}}{X}  {Y}{time_str:>{_BOX_TIME}}{X}  {DIM}│{X}")
 
 
@@ -555,38 +555,43 @@ def _solve3(A, b):
     return [M[i][3] for i in range(3)]
 
 
-def _rec_time(fmt: str, input_kb: float, triangles, total_seconds: float):
+def _rec_post_sew(fmt: str, n_faces: int, post_sew_seconds: float):
     data = _est_load()
-    x, y = float(input_kb), float(total_seconds)
-    data[fmt]    = _bucket_add(data.get(fmt,    {}), x, y)
-    data["_all"] = _bucket_add(data.get("_all", {}), x, y)
+    x, y = float(n_faces), float(post_sew_seconds)
+    data[f"f:{fmt}"]  = _bucket_add(data.get(f"f:{fmt}",  {}), x, y)
+    data["f:_all"]    = _bucket_add(data.get("f:_all",    {}), x, y)
     _est_save(data)
 
 
-def _est_time(input_kb: float, triangles=None, fmt=None):
+def _est_time_faces(n_faces: int, fmt=None):
     data  = _est_load()
-    x     = float(input_kb)
-    n_all = int(round(data.get("_all", {}).get("XtX", [[0]*3]*3)[2][2]))
-    if fmt and fmt in data:
-        pred, n, r2 = _bucket_predict(data[fmt], x)
-        if pred is not None:
-            return pred, n, r2
-    if "_all" in data:
-        pred, n, r2 = _bucket_predict(data["_all"], x)
+    x     = float(n_faces)
+    n_all = int(round(data.get("f:_all", {}).get("XtX", [[0]*3]*3)[2][2]))
+    if fmt:
+        key = f"f:{fmt}"
+        if key in data:
+            pred, n, r2 = _bucket_predict(data[key], x)
+            if pred is not None:
+                return pred, n, r2
+    if "f:_all" in data:
+        pred, n, r2 = _bucket_predict(data["f:_all"], x)
         if pred is not None:
             return pred, n, r2
     return None, n_all, 0.0
 
 
 def _fmt_time(seconds: float) -> str:
+    if seconds < 1.0:
+        return f"{int(seconds * 1000)}ms"
     s = int(round(seconds))
     if s < 60:
         return f"{s}s"
     return f"{s // 60}m {s % 60:02d}s"
 
 
-def _show_estimate(input_kb: float, fmt: str = None) -> None:
-    est, n_samples, r2 = _est_time(input_kb, fmt=fmt)
+def _show_post_sew_estimate(n_faces: int, fmt: str = None) -> None:
+    est, n_samples, r2 = _est_time_faces(n_faces, fmt=fmt)
+    _box_sep()
     if est is not None:
         _box_row(
             f"~{_fmt_time(est)}  estimated",
@@ -598,6 +603,7 @@ def _show_estimate(input_kb: float, fmt: str = None) -> None:
             f"learning...  {n_samples} of {_EST_MIN} conversions recorded",
             lc=DIM,
         )
+    _box_sep()
 
 
 def convert(input_path: Path, output_path: Path, tolerance: float = DEFAULT_TOLERANCE):
@@ -637,18 +643,21 @@ def convert(input_path: Path, output_path: Path, tolerance: float = DEFAULT_TOLE
         if sewn.IsNull():
             _step_fail()
             return False, "sewing failed, try a larger tolerance"
-        n_shells = _count_topo(sewn, TopAbs_SHELL)
+        n_shells     = _count_topo(sewn, TopAbs_SHELL)
+        n_faces_sewn = _count_topo(sewn, TopAbs_FACE)
         sew_parts = [f"{n_shells:,} shell{'s' if n_shells != 1 else ''}"]
         if n_free:
             sew_parts.append(f"{n_free:,} free edge{'s' if n_free != 1 else ''}")
         _step_end(t, "  ·  ".join(sew_parts))
 
+        t_post_sew = time.perf_counter()
+        _show_post_sew_estimate(n_faces_sewn, fmt=ext)
+
         t = _step_start("fixing")
-        n_faces_in = _count_topo(sewn, TopAbs_FACE)
         with quiet():
             fixed = _parallel_fix(sewn)
         n_faces_out = _count_topo(fixed, TopAbs_FACE)
-        _step_end(t, f"{n_faces_in:,} to {n_faces_out:,} faces")
+        _step_end(t, f"{n_faces_sewn:,} to {n_faces_out:,} faces")
 
         t = _step_start("refining")
         with quiet():
@@ -672,6 +681,7 @@ def convert(input_path: Path, output_path: Path, tolerance: float = DEFAULT_TOLE
         _step_end(t, f"{out_kb:,} KB")
 
         topo = _topo_counts(refined)
+        _rec_post_sew(ext, n_faces_sewn, time.perf_counter() - t_post_sew)
         return True, {
             "kb":    out_kb,
             "verts": n_verts,
@@ -724,16 +734,13 @@ def main():
             size_str = f"{src_kb:,} KB"
             _box_top()
             _box_row(f"[{i+1}/{n}]  {_trim(src_file.name, _BOX_CONTENT - len(size_str) - 3)}", size_str, lc=B, rc=DIM)
-            _show_estimate(src_kb, src_file.suffix.lower())
             _box_sep()
             _t0 = time.perf_counter()
             success, info = convert(src_file, out_file, tol)
             _elapsed = time.perf_counter() - _t0
-            if success:
-                _rec_time(src_file.suffix.lower(), src_kb, info.get("tris"), _elapsed)
             _box_sep()
             if success:
-                out_str = f"{info['kb']:,} KB"
+                out_str = f"{info['kb']:,} KB  ·  {_fmt_time(_elapsed)}"
                 _box_row(f"✓  {_trim(out_file.name, _BOX_CONTENT - len(out_str) - 3)}", out_str, lc=f"{G}{B}", rc=G)
                 ok_n += 1
             else:
@@ -767,16 +774,13 @@ def main():
     size_str = f"{src_kb:,} KB"
     _box_top()
     _box_row(f"[1/1]  {_trim(input_path.name, _BOX_CONTENT - len(size_str) - 3)}", size_str, lc=B, rc=DIM)
-    _show_estimate(src_kb, input_path.suffix.lower())
     _box_sep()
     _t0 = time.perf_counter()
     success, info = convert(input_path, output_path, args.tolerance)
     _elapsed = time.perf_counter() - _t0
-    if success:
-        _rec_time(input_path.suffix.lower(), src_kb, info.get("tris"), _elapsed)
     _box_sep()
     if success:
-        out_str = f"{info['kb']:,} KB"
+        out_str = f"{info['kb']:,} KB  ·  {_fmt_time(_elapsed)}"
         _box_row(f"✓  {_trim(output_path.name, _BOX_CONTENT - len(out_str) - 3)}", out_str, lc=f"{G}{B}", rc=G)
     else:
         _box_row(f"✗  {info.split(chr(10))[-1]}", lc=R)
@@ -790,4 +794,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        traceback.print_exc()
+        input("\n  Press Enter to exit...")
+        sys.exit(1)
