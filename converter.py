@@ -8,6 +8,7 @@ import struct
 import tempfile
 import time
 from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
@@ -46,6 +47,7 @@ except Exception:
 
 G   = '\033[92m'
 R   = '\033[91m'
+Y   = '\033[93m'
 C   = '\033[96m'
 DIM = '\033[2m'
 B   = '\033[1m'
@@ -68,20 +70,23 @@ def quiet():
     finally:
         sys.stdout.flush()
         sys.stderr.flush()
-        os.dup2(fd1, 1); os.close(fd1)
-        os.dup2(fd2, 2); os.close(fd2)
+        os.dup2(fd1, 1)
+        os.close(fd1)
+        os.dup2(fd2, 2)
+        os.close(fd2)
 
 
 try:
     with quiet():
         from OCC.Core.StlAPI import StlAPI_Reader
+        from OCC.Core.BRep import BRep_Builder
         from OCC.Core.BRepBuilderAPI import BRepBuilderAPI_Sewing
         from OCC.Core.ShapeUpgrade import ShapeUpgrade_UnifySameDomain
         from OCC.Core.ShapeFix import ShapeFix_Shape
         from OCC.Core.STEPControl import STEPControl_Writer, STEPControl_AsIs
         from OCC.Core.IGESControl import IGESControl_Reader
         from OCC.Core.IFSelect import IFSelect_RetDone, IFSelect_RetError, IFSelect_RetFail
-        from OCC.Core.TopoDS import TopoDS_Shape
+        from OCC.Core.TopoDS import TopoDS_Shape, TopoDS_Compound
         from OCC.Core.TopExp import TopExp_Explorer
         from OCC.Core.TopAbs import TopAbs_FACE, TopAbs_EDGE, TopAbs_SHELL
 except Exception as e:
@@ -143,8 +148,8 @@ def _find_3mf_model(zf: zipfile.ZipFile) -> str:
 
 
 def _read_3mf_shape(path: Path):
-    verts_all: list = []
-    tris_all: list = []
+    verts_all = []
+    tris_all  = []
 
     with zipfile.ZipFile(str(path), "r") as zf:
         model_file = _find_3mf_model(zf)
@@ -181,8 +186,8 @@ def _read_3mf_shape(path: Path):
 
 
 def _read_obj_shape(path: Path):
-    verts: list = []
-    tris: list = []
+    verts = []
+    tris  = []
     with open(path, "r", encoding="utf-8", errors="replace") as f:
         for line in f:
             parts = line.split()
@@ -213,8 +218,8 @@ def _read_amf_shape(path: Path):
     else:
         root = ET.fromstring(raw)
 
-    verts_all: list = []
-    tris_all: list = []
+    verts_all = []
+    tris_all  = []
     offset = 0
     for obj in root.findall("object"):
         mesh_el = obj.find("mesh")
@@ -292,19 +297,145 @@ def _topo_counts(shape) -> dict:
     }
 
 
+def _sew_chunk(args):
+    faces, tolerance = args
+    builder = BRep_Builder()
+    compound = TopoDS_Compound()
+    builder.MakeCompound(compound)
+    for face in faces:
+        builder.Add(compound, face)
+    sew = BRepBuilderAPI_Sewing(tolerance)
+    sew.Add(compound)
+    sew.Perform()
+    result = sew.SewedShape()
+    return result if not result.IsNull() else compound
+
+
+def _parallel_sew(shape, tolerance):
+    faces = []
+    exp = TopExp_Explorer(shape, TopAbs_FACE)
+    while exp.More():
+        faces.append(exp.Current())
+        exp.Next()
+
+    n_threads = os.cpu_count() or 1
+
+    if len(faces) < 200 or n_threads < 2:
+        sew = BRepBuilderAPI_Sewing(tolerance)
+        sew.Add(shape)
+        sew.Perform()
+        sewn = sew.SewedShape()
+        return sewn, sew.NbFreeEdges()
+
+    chunk_size = max(1, (len(faces) + n_threads - 1) // n_threads)
+    chunks = [faces[i:i + chunk_size] for i in range(0, len(faces), chunk_size)]
+
+    with ThreadPoolExecutor(max_workers=n_threads) as executor:
+        partial_shapes = list(executor.map(_sew_chunk, [(c, tolerance) for c in chunks]))
+
+    partial_shapes = [s for s in partial_shapes if s is not None and not s.IsNull()]
+
+    if not partial_shapes:
+        return TopoDS_Shape(), 0
+
+    final_sew = BRepBuilderAPI_Sewing(tolerance)
+    for s in partial_shapes:
+        final_sew.Add(s)
+    final_sew.Perform()
+    sewn = final_sew.SewedShape()
+    return sewn, final_sew.NbFreeEdges()
+
+
+def _collect_shells(shape):
+    shells = []
+    exp = TopExp_Explorer(shape, TopAbs_SHELL)
+    while exp.More():
+        shells.append(exp.Current())
+        exp.Next()
+    return shells
+
+
+def _combine_shapes(shapes):
+    builder = BRep_Builder()
+    compound = TopoDS_Compound()
+    builder.MakeCompound(compound)
+    for s in shapes:
+        builder.Add(compound, s)
+    return compound
+
+
+def _fix_shell(shell):
+    try:
+        fix = ShapeFix_Shape(shell)
+        fix.Perform()
+        result = fix.Shape()
+        return result if not result.IsNull() else shell
+    except Exception:
+        return shell
+
+
+def _refine_shell(args):
+    shell, tolerance = args
+    try:
+        u = ShapeUpgrade_UnifySameDomain(shell, True, True, True)
+        u.SetLinearTolerance(tolerance)
+        u.SetAngularTolerance(ANGULAR_TOLERANCE)
+        u.Build()
+        result = u.Shape()
+        return result if not result.IsNull() else shell
+    except Exception:
+        return shell
+
+
+def _parallel_fix(shape):
+    shells = _collect_shells(shape)
+    n_threads = os.cpu_count() or 1
+    if len(shells) < 2 or n_threads < 2:
+        try:
+            fix = ShapeFix_Shape(shape)
+            fix.Perform()
+            result = fix.Shape()
+            return result if not result.IsNull() else shape
+        except Exception:
+            return shape
+    with ThreadPoolExecutor(max_workers=min(n_threads, len(shells))) as executor:
+        results = list(executor.map(_fix_shell, shells))
+    results = [r for r in results if r is not None and not r.IsNull()]
+    return _combine_shapes(results) if results else shape
+
+
+def _parallel_refine(shape, tolerance):
+    shells = _collect_shells(shape)
+    n_threads = os.cpu_count() or 1
+    if len(shells) < 2 or n_threads < 2:
+        try:
+            u = ShapeUpgrade_UnifySameDomain(shape, True, True, True)
+            u.SetLinearTolerance(tolerance)
+            u.SetAngularTolerance(ANGULAR_TOLERANCE)
+            u.Build()
+            result = u.Shape()
+            return result if not result.IsNull() else shape
+        except Exception:
+            return shape
+    with ThreadPoolExecutor(max_workers=min(n_threads, len(shells))) as executor:
+        results = list(executor.map(_refine_shell, [(s, tolerance) for s in shells]))
+    results = [r for r in results if r is not None and not r.IsNull()]
+    return _combine_shapes(results) if results else shape
+
+
 _step_open = [False]
 
 
 def _box_top():
-    print(f"  ┌{'─' * (_BOX_CONTENT + 4)}┐")
+    print(f"  {DIM}┌{'─' * (_BOX_CONTENT + 4)}┐{X}")
 
 
 def _box_sep():
-    print(f"  ├{'─' * (_BOX_CONTENT + 4)}┤")
+    print(f"  {DIM}├{'─' * (_BOX_CONTENT + 4)}┤{X}")
 
 
 def _box_bot():
-    print(f"  └{'─' * (_BOX_CONTENT + 4)}┘")
+    print(f"  {DIM}└{'─' * (_BOX_CONTENT + 4)}┘{X}")
 
 
 def _box_row(left: str, right: str = "", lc: str = "", rc: str = "") -> None:
@@ -312,52 +443,35 @@ def _box_row(left: str, right: str = "", lc: str = "", rc: str = "") -> None:
     if len(left) > max_left:
         left = left[:max_left - 3] + "..."
     gap = _BOX_CONTENT - len(left) - len(right)
-    print(f"  │  {lc}{left}{X}{' ' * gap}{rc}{right}{X}  │")
+    print(f"  {DIM}│{X}  {lc}{left}{X}{' ' * gap}{rc}{right}{X}  {DIM}│{X}")
 
 
 def _step_start(label: str) -> float:
     _step_open[0] = True
-    print(f"  │  {DIM}{label:<{_BOX_LABEL}}", end="", flush=True)
+    print(f"  {DIM}│{X}  {DIM}{label:<{_BOX_LABEL}}", end="", flush=True)
     return time.perf_counter()
 
 
 def _step_end(t0: float, detail: str = "") -> None:
     _step_open[0] = False
     elapsed = time.perf_counter() - t0
-    time_str = f"{elapsed:.1f}s"
     if len(detail) > _BOX_DETAIL:
         detail = detail[:_BOX_DETAIL - 3] + "..."
-    print(f"{detail:<{_BOX_DETAIL}}  {time_str:>{_BOX_TIME}}{X}  │")
+    time_str = f"{elapsed:.1f}s"
+    print(f"{X}{C}{detail:<{_BOX_DETAIL}}{X}  {Y}{time_str:>{_BOX_TIME}}{X}  {DIM}│{X}")
 
 
 def _step_fail() -> None:
     if _step_open[0]:
         _step_open[0] = False
-        print(f"{'error':<{_BOX_DETAIL}}  {'failed':>{_BOX_TIME}}{X}  │")
+        print(f"{X}{R}{'error':<{_BOX_DETAIL}}{X}  {R}{'failed':>{_BOX_TIME}}{X}  {DIM}│{X}")
 
 
 def _trim(name: str, width: int = NAME_TRIM_WIDTH) -> str:
     return name if len(name) <= width else name[:width - 3] + "..."
 
 
-def _stats_line(info: dict) -> str:
-    in_parts = []
-    if info.get("verts") is not None:
-        in_parts.append(f"{info['verts']:,} vertices")
-    if info.get("tris") is not None:
-        in_parts.append(f"{info['tris']:,} triangles")
-    out_parts = []
-    if info.get("faces"):
-        out_parts.append(f"{info['faces']:,} faces")
-    if info.get("edges"):
-        out_parts.append(f"{info['edges']:,} edges")
-    if in_parts and out_parts:
-        return "  -  ".join(in_parts) + "  to  " + "  -  ".join(out_parts)
-    return "  -  ".join(in_parts + out_parts)
-
-
 def convert(input_path: Path, output_path: Path, tolerance: float = DEFAULT_TOLERANCE):
-    dst = output_path.as_posix()
     n_verts = n_tris = None
 
     try:
@@ -389,16 +503,12 @@ def convert(input_path: Path, output_path: Path, tolerance: float = DEFAULT_TOLE
         _step_end(t, "  -  ".join(read_parts))
 
         t = _step_start("sewing")
-        sew = BRepBuilderAPI_Sewing(tolerance)
-        sew.Add(shape)
         with quiet():
-            sew.Perform()
-        sewn = sew.SewedShape()
+            sewn, n_free = _parallel_sew(shape, tolerance)
         if sewn.IsNull():
             _step_fail()
             return False, "sewing failed - try a larger tolerance"
         n_shells = _count_topo(sewn, TopAbs_SHELL)
-        n_free   = sew.NbFreeEdges()
         sew_parts = [f"{n_shells:,} shell{'s' if n_shells != 1 else ''}"]
         if n_free:
             sew_parts.append(f"{n_free:,} free edge{'s' if n_free != 1 else ''}")
@@ -406,39 +516,22 @@ def convert(input_path: Path, output_path: Path, tolerance: float = DEFAULT_TOLE
 
         t = _step_start("fixing")
         n_faces_in = _count_topo(sewn, TopAbs_FACE)
-        try:
-            with quiet():
-                fix = ShapeFix_Shape(sewn)
-                fix.Perform()
-            fixed = fix.Shape()
-            if fixed.IsNull():
-                fixed = sewn
-        except Exception:
-            fixed = sewn
+        with quiet():
+            fixed = _parallel_fix(sewn)
         n_faces_out = _count_topo(fixed, TopAbs_FACE)
         _step_end(t, f"{n_faces_in:,} to {n_faces_out:,} faces")
 
         t = _step_start("refining")
-        n_faces_before = _count_topo(fixed, TopAbs_FACE)
-        try:
-            with quiet():
-                u = ShapeUpgrade_UnifySameDomain(fixed, True, True, True)
-                u.SetLinearTolerance(tolerance)
-                u.SetAngularTolerance(ANGULAR_TOLERANCE)
-                u.Build()
-            refined = u.Shape()
-            if refined.IsNull():
-                raise RuntimeError
-        except Exception:
-            refined = fixed
+        with quiet():
+            refined = _parallel_refine(fixed, tolerance)
         n_faces_after = _count_topo(refined, TopAbs_FACE)
-        _step_end(t, f"{n_faces_before:,} to {n_faces_after:,} faces")
+        _step_end(t, f"{n_faces_out:,} to {n_faces_after:,} faces")
 
         t = _step_start("writing")
         writer = STEPControl_Writer()
         with quiet():
             ts = writer.Transfer(refined, STEPControl_AsIs)
-            ws = writer.Write(dst)
+            ws = writer.Write(output_path.as_posix())
         if ts in (IFSelect_RetError, IFSelect_RetFail) or \
            ws in (IFSelect_RetError, IFSelect_RetFail):
             _step_fail()
@@ -494,15 +587,16 @@ def main():
         n = len(files)
         print(f"  {n} file{'s' if n > 1 else ''} found in {C}{MODELS_DIR_NAME}\\{X}\n")
 
+        tasks = [(f, f.with_suffix(STP_EXT), args.tolerance) for f in files]
         ok_n = fail_n = 0
-        for i, src_file in enumerate(files, 1):
-            out_file = src_file.with_suffix(STP_EXT)
+
+        for i, (src_file, out_file, tol) in enumerate(tasks):
             src_kb = src_file.stat().st_size // BYTES_PER_KB
             size_str = f"{src_kb:,} KB"
             _box_top()
-            _box_row(f"[{i}/{n}]  {_trim(src_file.name, _BOX_CONTENT - len(size_str) - 3)}", size_str, lc=B, rc=DIM)
+            _box_row(f"[{i+1}/{n}]  {_trim(src_file.name, _BOX_CONTENT - len(size_str) - 3)}", size_str, lc=B, rc=DIM)
             _box_sep()
-            success, info = convert(src_file, out_file, args.tolerance)
+            success, info = convert(src_file, out_file, tol)
             _box_sep()
             if success:
                 out_str = f"{info['kb']:,} KB"
