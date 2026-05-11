@@ -407,8 +407,7 @@ def _parallel_fix(shape):
 
 def _parallel_refine(shape, tolerance):
     shells = _collect_shells(shape)
-    n_threads = os.cpu_count() or 1
-    if len(shells) < 2 or n_threads < 2:
+    if len(shells) < 2:
         try:
             u = ShapeUpgrade_UnifySameDomain(shape, True, True, True)
             u.SetLinearTolerance(tolerance)
@@ -418,8 +417,7 @@ def _parallel_refine(shape, tolerance):
             return result if not result.IsNull() else shape
         except Exception:
             return shape
-    with ThreadPoolExecutor(max_workers=min(n_threads, len(shells))) as executor:
-        results = list(executor.map(_refine_shell, [(s, tolerance) for s in shells]))
+    results = [_refine_shell((s, tolerance)) for s in shells]
     results = [r for r in results if r is not None and not r.IsNull()]
     return _combine_shapes(results) if results else shape
 
