@@ -57,9 +57,11 @@ def quiet():
     sys.stderr.flush()
     fd1, fd2 = os.dup(1), os.dup(2)
     nul = os.open(os.devnull, os.O_WRONLY)
-    os.dup2(nul, 1)
-    os.dup2(nul, 2)
-    os.close(nul)
+    try:
+        os.dup2(nul, 1)
+        os.dup2(nul, 2)
+    finally:
+        os.close(nul)
     try:
         yield
     finally:
@@ -69,7 +71,28 @@ def quiet():
         os.dup2(fd2, 2); os.close(fd2)
 
 
+try:
+    with quiet():
+        from OCC.Core.StlAPI import StlAPI_Reader
+        from OCC.Core.BRepBuilderAPI import BRepBuilderAPI_Sewing
+        from OCC.Core.ShapeUpgrade import ShapeUpgrade_UnifySameDomain
+        from OCC.Core.ShapeFix import ShapeFix_Shape
+        from OCC.Core.STEPControl import STEPControl_Writer, STEPControl_AsIs
+        from OCC.Core.IGESControl import IGESControl_Reader
+        from OCC.Core.IFSelect import IFSelect_RetDone, IFSelect_RetError, IFSelect_RetFail
+        from OCC.Core.TopoDS import TopoDS_Shape
+        from OCC.Core.TopExp import TopExp_Explorer
+        from OCC.Core.TopAbs import TopAbs_FACE, TopAbs_EDGE
+except Exception as e:
+    print(f"\n  {R}[ERROR]{X} Failed to load OpenCASCADE: {e}\n")
+    traceback.print_exc()
+    input("\n  Press Enter to exit...")
+    sys.exit(1)
+
+
 _3MF_NS = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
+_STL_TRI = struct.Struct("<12fH")
+_SUPPORTED_EXTS = {STL_EXT, TMF_EXT, OBJ_EXT, AMF_EXT, IGS_EXT, ".iges"}
 
 
 def _mesh_to_shape(verts: list, tris: list):
@@ -78,15 +101,12 @@ def _mesh_to_shape(verts: list, tris: list):
     tmp_fd, tmp_path = tempfile.mkstemp(suffix=".stl")
     try:
         with os.fdopen(tmp_fd, "wb") as f:
-            f.write(b"\x00" * 80)
-            f.write(struct.pack("<I", len(tris)))
-            for t in tris:
+            buf = bytearray(80 + 4 + len(tris) * _STL_TRI.size)
+            struct.pack_into("<I", buf, 80, len(tris))
+            for i, t in enumerate(tris):
                 v0, v1, v2 = verts[t[0]], verts[t[1]], verts[t[2]]
-                f.write(struct.pack("<fff", 0.0, 0.0, 0.0))
-                f.write(struct.pack("<fff", *v0))
-                f.write(struct.pack("<fff", *v1))
-                f.write(struct.pack("<fff", *v2))
-                f.write(struct.pack("<H", 0))
+                _STL_TRI.pack_into(buf, 84 + i * _STL_TRI.size, 0.0, 0.0, 0.0, *v0, *v1, *v2, 0)
+            f.write(buf)
         shape = TopoDS_Shape()
         with quiet():
             StlAPI_Reader().Read(shape, tmp_path.replace("\\", "/"))
@@ -99,8 +119,9 @@ def _mesh_to_shape(verts: list, tris: list):
 
 
 def _find_3mf_model(zf: zipfile.ZipFile) -> str:
+    names = zf.namelist()
     rels_path = "_rels/.rels"
-    if rels_path in zf.namelist():
+    if rels_path in names:
         with zf.open(rels_path) as f:
             root = ET.parse(f).getroot()
         rels_ns = "http://schemas.openxmlformats.org/package/2006/relationships"
@@ -109,7 +130,7 @@ def _find_3mf_model(zf: zipfile.ZipFile) -> str:
                 target = rel.get("Target", "").lstrip("/")
                 if target:
                     return target
-    for name in zf.namelist():
+    for name in names:
         if name.endswith(".model"):
             return name
     raise ValueError("could not find 3D model document in 3MF archive")
@@ -141,18 +162,16 @@ def _read_3mf_shape(path: Path):
             (float(v.get("x")), float(v.get("y")), float(v.get("z")))
             for v in verts_el.findall(f"{{{_3MF_NS}}}vertex")
         ]
-        tris = [
-            (int(t.get("v1")), int(t.get("v2")), int(t.get("v3")))
+        tris_all.extend(
+            (int(t.get("v1")) + offset, int(t.get("v2")) + offset, int(t.get("v3")) + offset)
             for t in tris_el.findall(f"{{{_3MF_NS}}}triangle")
-        ]
-        for t in tris:
-            tris_all.append((t[0] + offset, t[1] + offset, t[2] + offset))
+        )
         verts_all.extend(verts)
         offset += len(verts)
 
     if not tris_all:
         raise ValueError("no triangle data found in 3MF file")
-    return _mesh_to_shape(verts_all, tris_all)
+    return _mesh_to_shape(verts_all, tris_all), len(verts_all), len(tris_all)
 
 
 def _read_obj_shape(path: Path):
@@ -174,7 +193,7 @@ def _read_obj_shape(path: Path):
                     tris.append((indices[0], indices[i], indices[i + 1]))
     if not verts:
         raise ValueError("no vertex data found in OBJ file")
-    return _mesh_to_shape(verts, tris)
+    return _mesh_to_shape(verts, tris), len(verts), len(tris)
 
 
 def _read_amf_shape(path: Path):
@@ -217,60 +236,96 @@ def _read_amf_shape(path: Path):
                 ))
         verts_all.extend(verts)
         offset += len(verts)
-    return _mesh_to_shape(verts_all, tris_all)
+    if not tris_all:
+        raise ValueError("no triangle data found in AMF file")
+    return _mesh_to_shape(verts_all, tris_all), len(verts_all), len(tris_all)
 
 
 def _read_iges_shape(path: Path):
     reader = IGESControl_Reader()
     with quiet():
         status = reader.ReadFile(path.as_posix())
+        if status == IFSelect_RetDone:
+            reader.TransferRoots()
     if status != IFSelect_RetDone:
         raise ValueError(f"IGES reader failed with status {status}")
-    with quiet():
-        reader.TransferRoots()
     shape = reader.OneShape()
     if shape.IsNull():
         raise ValueError("IGES file produced an empty shape")
-    return shape
+    return shape, None, None
 
 
-try:
-    with quiet():
-        from OCC.Core.StlAPI import StlAPI_Reader
-        from OCC.Core.BRepBuilderAPI import BRepBuilderAPI_Sewing
-        from OCC.Core.ShapeUpgrade import ShapeUpgrade_UnifySameDomain
-        from OCC.Core.ShapeFix import ShapeFix_Shape
-        from OCC.Core.STEPControl import STEPControl_Writer, STEPControl_AsIs
-        from OCC.Core.IGESControl import IGESControl_Reader
-        from OCC.Core.IFSelect import IFSelect_RetDone, IFSelect_RetError, IFSelect_RetFail
-        from OCC.Core.TopoDS import TopoDS_Shape
-except Exception as e:
-    print(f"\n  {R}[ERROR]{X} Failed to load OpenCASCADE: {e}\n")
-    traceback.print_exc()
-    input("\n  Press Enter to exit...")
-    sys.exit(1)
+def _stl_tri_count(path: Path):
+    try:
+        with open(path, "rb") as f:
+            header = f.read(84)
+        if len(header) < 84:
+            return None
+        n = struct.unpack_from("<I", header, 80)[0]
+        if 84 + n * 50 == path.stat().st_size:
+            return n
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            return sum(1 for line in f if line.lstrip().startswith("facet normal"))
+    except Exception:
+        return None
 
+
+def _topo_counts(shape):
+    result = {}
+    for key, kind in (("faces", TopAbs_FACE), ("edges", TopAbs_EDGE)):
+        exp = TopExp_Explorer(shape, kind)
+        n = 0
+        while exp.More():
+            n += 1
+            exp.Next()
+        result[key] = n
+    return result
+
+
+def _dot(label: str):
+    print(f"{DIM}{label}{X}", end="  ", flush=True)
+
+
+def _trim(name: str, width: int = NAME_TRIM_WIDTH) -> str:
+    return name if len(name) <= width else name[:width - 3] + "..."
+
+
+def _stats_line(info: dict) -> str:
+    in_parts = []
+    if info.get("verts") is not None:
+        in_parts.append(f"{info['verts']:,} verts")
+    if info.get("tris") is not None:
+        in_parts.append(f"{info['tris']:,} tris")
+    out_parts = []
+    if info.get("faces"):
+        out_parts.append(f"{info['faces']:,} faces")
+    if info.get("edges"):
+        out_parts.append(f"{info['edges']:,} edges")
+    if in_parts and out_parts:
+        return "  ·  ".join(in_parts) + "  →  " + "  ·  ".join(out_parts)
+    return "  ·  ".join(in_parts + out_parts)
 
 
 def convert(input_path: Path, output_path: Path, tolerance: float = DEFAULT_TOLERANCE):
-    src = input_path.as_posix()
     dst = output_path.as_posix()
+    n_verts = n_tris = None
 
     try:
         _dot("reading")
         ext = input_path.suffix.lower()
         if ext == TMF_EXT:
-            shape = _read_3mf_shape(input_path)
+            shape, n_verts, n_tris = _read_3mf_shape(input_path)
         elif ext == OBJ_EXT:
-            shape = _read_obj_shape(input_path)
+            shape, n_verts, n_tris = _read_obj_shape(input_path)
         elif ext == AMF_EXT:
-            shape = _read_amf_shape(input_path)
+            shape, n_verts, n_tris = _read_amf_shape(input_path)
         elif ext in {IGS_EXT, ".iges"}:
-            shape = _read_iges_shape(input_path)
+            shape, n_verts, n_tris = _read_iges_shape(input_path)
         else:
             shape = TopoDS_Shape()
             with quiet():
-                StlAPI_Reader().Read(shape, src)
+                StlAPI_Reader().Read(shape, input_path.as_posix())
+            n_tris = _stl_tri_count(input_path)
         if shape.IsNull():
             return False, "input produced an empty shape"
 
@@ -319,18 +374,17 @@ def convert(input_path: Path, output_path: Path, tolerance: float = DEFAULT_TOLE
         if not output_path.exists() or output_path.stat().st_size == 0:
             return False, "output file is missing or empty"
 
-        return True, output_path.stat().st_size // BYTES_PER_KB
+        topo = _topo_counts(refined)
+        return True, {
+            "kb":    output_path.stat().st_size // BYTES_PER_KB,
+            "verts": n_verts,
+            "tris":  n_tris,
+            "faces": topo["faces"],
+            "edges": topo["edges"],
+        }
 
     except Exception:
         return False, traceback.format_exc().strip()
-
-
-def _dot(label: str):
-    print(f"{DIM}{label}{X}", end="  ", flush=True)
-
-
-def _trim(name: str, width: int = NAME_TRIM_WIDTH) -> str:
-    return name if len(name) <= width else name[:width - 3] + "..."
 
 
 def models_dir() -> Path:
@@ -354,8 +408,7 @@ def main():
         folder = models_dir()
         folder.mkdir(exist_ok=True)
 
-        _supported = {STL_EXT, TMF_EXT, OBJ_EXT, AMF_EXT, IGS_EXT, ".iges"}
-        files = sorted(f for f in folder.iterdir() if f.suffix.lower() in _supported)
+        files = sorted(f for f in folder.iterdir() if f.suffix.lower() in _SUPPORTED_EXTS)
         if not files:
             print(f"  No supported files found in {MODELS_DIR_NAME}\\\n")
             input("  Press Enter to exit...")
@@ -369,11 +422,14 @@ def main():
             out_file = src_file.with_suffix(STP_EXT)
             src_kb = src_file.stat().st_size // BYTES_PER_KB
             print(f"  {B}[{i}/{n}]{X}  {_trim(src_file.name)}  {DIM}{src_kb} KB{X}")
-            print(f"         ", end="", flush=True)
+            print("         ", end="", flush=True)
             success, info = convert(src_file, out_file, args.tolerance)
             print()
             if success:
-                print(f"         {G}{_trim(out_file.name)}  {info} KB{X}")
+                print(f"         {G}{_trim(out_file.name)}  {info['kb']} KB{X}")
+                stats = _stats_line(info)
+                if stats:
+                    print(f"         {DIM}{stats}{X}")
                 ok_n += 1
             else:
                 print(f"         {R}✗  {info}{X}")
@@ -403,11 +459,14 @@ def main():
 
     src_kb = input_path.stat().st_size // BYTES_PER_KB
     print(f"  {B}[1/1]{X}  {_trim(input_path.name)}  {DIM}{src_kb} KB{X}")
-    print(f"         ", end="", flush=True)
+    print("         ", end="", flush=True)
     success, info = convert(input_path, output_path, args.tolerance)
     print()
     if success:
-        print(f"         {G}{_trim(output_path.name)}  {info} KB{X}")
+        print(f"         {G}{_trim(output_path.name)}  {info['kb']} KB{X}")
+        stats = _stats_line(info)
+        if stats:
+            print(f"         {DIM}{stats}{X}")
         print()
         print(f"  {G}{B}✓  Done{X}")
     else:
