@@ -95,6 +95,11 @@ _3MF_NS = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
 _STL_TRI = struct.Struct("<12fH")
 _SUPPORTED_EXTS = {STL_EXT, TMF_EXT, OBJ_EXT, AMF_EXT, IGS_EXT, ".iges"}
 
+_BOX_CONTENT = 60
+_BOX_LABEL   = 10
+_BOX_TIME    = 6
+_BOX_DETAIL  = _BOX_CONTENT - _BOX_LABEL - 2 - _BOX_TIME
+
 
 def _mesh_to_shape(verts: list, tris: list):
     if not tris:
@@ -287,18 +292,48 @@ def _topo_counts(shape) -> dict:
     }
 
 
+_step_open = [False]
+
+
+def _box_top():
+    print(f"  ┌{'─' * (_BOX_CONTENT + 4)}┐")
+
+
+def _box_sep():
+    print(f"  ├{'─' * (_BOX_CONTENT + 4)}┤")
+
+
+def _box_bot():
+    print(f"  └{'─' * (_BOX_CONTENT + 4)}┘")
+
+
+def _box_row(left: str, right: str = "", lc: str = "", rc: str = "") -> None:
+    max_left = _BOX_CONTENT - len(right) - (1 if right else 0)
+    if len(left) > max_left:
+        left = left[:max_left - 3] + "..."
+    gap = _BOX_CONTENT - len(left) - len(right)
+    print(f"  │  {lc}{left}{X}{' ' * gap}{rc}{right}{X}  │")
+
+
 def _step_start(label: str) -> float:
-    print(f"         {DIM}{label:<10}{X}", end="", flush=True)
+    _step_open[0] = True
+    print(f"  │  {DIM}{label:<{_BOX_LABEL}}", end="", flush=True)
     return time.perf_counter()
 
 
 def _step_end(t0: float, detail: str = "") -> None:
+    _step_open[0] = False
     elapsed = time.perf_counter() - t0
     time_str = f"{elapsed:.1f}s"
-    if detail:
-        print(f"  {DIM}{detail}  -  {time_str}{X}")
-    else:
-        print(f"  {DIM}{time_str}{X}")
+    if len(detail) > _BOX_DETAIL:
+        detail = detail[:_BOX_DETAIL - 3] + "..."
+    print(f"{detail:<{_BOX_DETAIL}}  {time_str:>{_BOX_TIME}}{X}  │")
+
+
+def _step_fail() -> None:
+    if _step_open[0]:
+        _step_open[0] = False
+        print(f"{'error':<{_BOX_DETAIL}}  {'failed':>{_BOX_TIME}}{X}  │")
 
 
 def _trim(name: str, width: int = NAME_TRIM_WIDTH) -> str:
@@ -342,7 +377,7 @@ def convert(input_path: Path, output_path: Path, tolerance: float = DEFAULT_TOLE
                 StlAPI_Reader().Read(shape, input_path.as_posix())
             n_tris = _stl_tri_count(input_path)
         if shape.IsNull():
-            print()
+            _step_fail()
             return False, "input produced an empty shape"
         read_parts = []
         if n_verts is not None:
@@ -360,7 +395,7 @@ def convert(input_path: Path, output_path: Path, tolerance: float = DEFAULT_TOLE
             sew.Perform()
         sewn = sew.SewedShape()
         if sewn.IsNull():
-            print()
+            _step_fail()
             return False, "sewing failed - try a larger tolerance"
         n_shells = _count_topo(sewn, TopAbs_SHELL)
         n_free   = sew.NbFreeEdges()
@@ -370,6 +405,7 @@ def convert(input_path: Path, output_path: Path, tolerance: float = DEFAULT_TOLE
         _step_end(t, "  -  ".join(sew_parts))
 
         t = _step_start("fixing")
+        n_faces_in = _count_topo(sewn, TopAbs_FACE)
         try:
             with quiet():
                 fix = ShapeFix_Shape(sewn)
@@ -379,7 +415,8 @@ def convert(input_path: Path, output_path: Path, tolerance: float = DEFAULT_TOLE
                 fixed = sewn
         except Exception:
             fixed = sewn
-        _step_end(t)
+        n_faces_out = _count_topo(fixed, TopAbs_FACE)
+        _step_end(t, f"{n_faces_in:,} to {n_faces_out:,} faces")
 
         t = _step_start("refining")
         n_faces_before = _count_topo(fixed, TopAbs_FACE)
@@ -404,10 +441,10 @@ def convert(input_path: Path, output_path: Path, tolerance: float = DEFAULT_TOLE
             ws = writer.Write(dst)
         if ts in (IFSelect_RetError, IFSelect_RetFail) or \
            ws in (IFSelect_RetError, IFSelect_RetFail):
-            print()
+            _step_fail()
             return False, "STEP writer failed"
         if not output_path.exists() or output_path.stat().st_size == 0:
-            print()
+            _step_fail()
             return False, "output file is missing or empty"
         out_kb = output_path.stat().st_size // BYTES_PER_KB
         _step_end(t, f"{out_kb:,} KB")
@@ -422,7 +459,7 @@ def convert(input_path: Path, output_path: Path, tolerance: float = DEFAULT_TOLE
         }
 
     except Exception:
-        print()
+        _step_fail()
         return False, traceback.format_exc().strip()
 
 
@@ -438,9 +475,10 @@ def main():
     args = parser.parse_args()
 
     print()
-    print(f"  {C}{B}╔══════════════════════════════╗{X}")
-    print(f"  {C}{B}║       2STEP-Converter        ║{X}")
-    print(f"  {C}{B}╚══════════════════════════════╝{X}")
+    _w = _BOX_CONTENT + 4
+    print(f"  {C}{B}╔{'═' * _w}╗{X}")
+    print(f"  {C}{B}║{'2STEP-Converter':^{_w}}║{X}")
+    print(f"  {C}{B}╚{'═' * _w}╝{X}")
     print()
 
     if args.input is None:
@@ -460,14 +498,20 @@ def main():
         for i, src_file in enumerate(files, 1):
             out_file = src_file.with_suffix(STP_EXT)
             src_kb = src_file.stat().st_size // BYTES_PER_KB
-            print(f"  {B}[{i}/{n}]{X}  {_trim(src_file.name)}  {DIM}{src_kb} KB{X}")
+            size_str = f"{src_kb:,} KB"
+            _box_top()
+            _box_row(f"[{i}/{n}]  {_trim(src_file.name, _BOX_CONTENT - len(size_str) - 3)}", size_str, lc=B, rc=DIM)
+            _box_sep()
             success, info = convert(src_file, out_file, args.tolerance)
+            _box_sep()
             if success:
-                print(f"         {G}{_trim(out_file.name)}  {info['kb']} KB{X}")
+                out_str = f"{info['kb']:,} KB"
+                _box_row(f"✓  {_trim(out_file.name, _BOX_CONTENT - len(out_str) - 3)}", out_str, lc=f"{G}{B}", rc=G)
                 ok_n += 1
             else:
-                print(f"         {R}✗  {info}{X}")
+                _box_row(f"✗  {info.split(chr(10))[-1]}", lc=R)
                 fail_n += 1
+            _box_bot()
             print()
 
         print(f"  {DIM}{'-' * SEPARATOR_WIDTH}{X}")
@@ -492,14 +536,21 @@ def main():
         output_path = input_path.with_suffix(STP_EXT)
 
     src_kb = input_path.stat().st_size // BYTES_PER_KB
-    print(f"  {B}[1/1]{X}  {_trim(input_path.name)}  {DIM}{src_kb} KB{X}")
+    size_str = f"{src_kb:,} KB"
+    _box_top()
+    _box_row(f"[1/1]  {_trim(input_path.name, _BOX_CONTENT - len(size_str) - 3)}", size_str, lc=B, rc=DIM)
+    _box_sep()
     success, info = convert(input_path, output_path, args.tolerance)
+    _box_sep()
     if success:
-        print(f"         {G}{_trim(output_path.name)}  {info['kb']} KB{X}")
-        print()
-        print(f"  {G}{B}✓  Done{X}")
+        out_str = f"{info['kb']:,} KB"
+        _box_row(f"✓  {_trim(output_path.name, _BOX_CONTENT - len(out_str) - 3)}", out_str, lc=f"{G}{B}", rc=G)
     else:
-        print(f"         {R}✗  {info}{X}")
+        _box_row(f"✗  {info.split(chr(10))[-1]}", lc=R)
+    _box_bot()
+    print()
+    if success:
+        print(f"  {G}{B}✓  Done{X}")
     print()
     input("  Press Enter to exit...")
     sys.exit(0 if success else 1)
