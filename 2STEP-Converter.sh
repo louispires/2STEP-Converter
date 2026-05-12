@@ -71,7 +71,7 @@ fi
 
 if [ ! -f "$PY" ]; then
     echo "Setting up Python environment (one-time download, ~500 MB) ..."
-    "$MM" create --prefix "$ENV" -c conda-forge python=3.12 pythonocc-core --yes
+    "$MM" create --prefix "$ENV" -c conda-forge python=3.12 pythonocc-core trimesh fast-simplification --yes
     if [ $? -ne 0 ]; then
         echo "[ERROR] Failed to create Python environment."
         exit 1
@@ -85,6 +85,11 @@ else
             exit 1
         fi
     fi
+fi
+
+if ! "$PY" -c "import trimesh; import fast_simplification" >/dev/null 2>&1; then
+    echo "Installing trimesh ..."
+    "$MM" install --prefix "$ENV" -c conda-forge trimesh fast-simplification --yes || "$PY" -m pip install trimesh fast-simplification
 fi
 
 "$PY" "$SCRIPT_DIR/converter.py" "$@"

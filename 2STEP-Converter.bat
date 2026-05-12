@@ -77,12 +77,12 @@ if !_SZ! LSS 5000000 (
 if exist "!_PY!" goto :check_occ
 
 echo Setting up Python environment (one-time download, ~500 MB) ...
-"!_MM!" create --prefix "!_ENV!" -c conda-forge python=3.12 pythonocc-core --yes
+"!_MM!" create --prefix "!_ENV!" -c conda-forge python=3.12 pythonocc-core trimesh fast-simplification --yes
 if errorlevel 1 (
     echo [ERROR] Failed to create Python environment.
     pause & exit /b 1
 )
-goto :run
+goto :check_trimesh
 
 :check_occ
 "!_PY!" -c "from OCC.Core.StlAPI import StlAPI_Reader" >nul 2>&1
@@ -95,6 +95,16 @@ if errorlevel 1 (
     )
 )
 
+
+:check_trimesh
+"!_PY!" -c "import trimesh; import fast_simplification" >nul 2>&1
+if errorlevel 1 (
+    echo Installing trimesh ...
+    "!_MM!" install --prefix "!_ENV!" -c conda-forge trimesh fast-simplification --yes
+    if errorlevel 1 (
+        "!_PY!" -m pip install trimesh fast-simplification
+    )
+)
 
 :run
 "!_PY!" "%~dp0converter.py" %*

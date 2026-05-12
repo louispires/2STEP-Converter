@@ -9,37 +9,86 @@ import zipfile
 import struct
 import tempfile
 import time
+import threading
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
-_CONFIG_PATH = Path(__file__).parent / "config.py"
-if not _CONFIG_PATH.exists():
-    _CONFIG_PATH.write_text(
-        "DEFAULT_TOLERANCE   = 0.01\n"
-        "ANGULAR_TOLERANCE   = 1e-3\n"
-        "NAME_TRIM_WIDTH     = 62\n"
-        "SEPARATOR_WIDTH     = 32\n"
-        "BYTES_PER_KB        = 1024\n"
-        "STD_OUTPUT_HANDLE   = -11\n"
-        "CONSOLE_MODE_FLAGS  = 7\n"
-        'MODELS_DIR_NAME     = "models"\n'
-        'STL_EXT             = ".stl"\n'
-        'TMF_EXT             = ".3mf"\n'
-        'OBJ_EXT             = ".obj"\n'
-        'IGS_EXT             = ".igs"\n'
-        'AMF_EXT             = ".amf"\n'
-        'STP_EXT             = ".stp"\n',
-        encoding="utf-8",
-    )
+_DATA_DIR = Path(__file__).parent / "data"
+_DATA_DIR.mkdir(exist_ok=True)
 
-from config import (
-    STD_OUTPUT_HANDLE, CONSOLE_MODE_FLAGS,
-    DEFAULT_TOLERANCE, ANGULAR_TOLERANCE,
-    NAME_TRIM_WIDTH, SEPARATOR_WIDTH,
-    MODELS_DIR_NAME, STL_EXT, TMF_EXT, OBJ_EXT, IGS_EXT, AMF_EXT, STP_EXT, BYTES_PER_KB,
-)
+_CONFIG_DEFAULTS = {
+    "DEFAULT_TOLERANCE":    0.01,
+    "DEFAULT_SIMPLIFY":     0,
+    "SIMPLIFY_INTERACTIVE": False,
+    "SKIP_EXISTING":        True,
+    "ANGULAR_TOLERANCE":    1e-3,
+    "NAME_TRIM_WIDTH":      62,
+    "SEPARATOR_WIDTH":      32,
+    "BYTES_PER_KB":         1024,
+    "STD_OUTPUT_HANDLE":    -11,
+    "CONSOLE_MODE_FLAGS":   7,
+    "DEFAULT_FORMAT":       "ap203",
+    "MODELS_DIR_NAME":      "models",
+    "STL_EXT":              ".stl",
+    "TMF_EXT":              ".3mf",
+    "OBJ_EXT":              ".obj",
+    "IGS_EXT":              ".igs",
+    "AMF_EXT":              ".amf",
+    "STP_EXT":              ".stp",
+}
+
+_CONFIG_PATH = _DATA_DIR / "config.json"
+if not _CONFIG_PATH.exists():
+    _CONFIG_PATH.write_text(json.dumps(_CONFIG_DEFAULTS, indent=4), encoding="utf-8")
+
+_cfg = json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
+STD_OUTPUT_HANDLE    = _cfg.get("STD_OUTPUT_HANDLE",    _CONFIG_DEFAULTS["STD_OUTPUT_HANDLE"])
+CONSOLE_MODE_FLAGS   = _cfg.get("CONSOLE_MODE_FLAGS",   _CONFIG_DEFAULTS["CONSOLE_MODE_FLAGS"])
+DEFAULT_TOLERANCE    = _cfg.get("DEFAULT_TOLERANCE",    _CONFIG_DEFAULTS["DEFAULT_TOLERANCE"])
+ANGULAR_TOLERANCE    = _cfg.get("ANGULAR_TOLERANCE",    _CONFIG_DEFAULTS["ANGULAR_TOLERANCE"])
+NAME_TRIM_WIDTH      = _cfg.get("NAME_TRIM_WIDTH",      _CONFIG_DEFAULTS["NAME_TRIM_WIDTH"])
+SEPARATOR_WIDTH      = _cfg.get("SEPARATOR_WIDTH",      _CONFIG_DEFAULTS["SEPARATOR_WIDTH"])
+MODELS_DIR_NAME      = _cfg.get("MODELS_DIR_NAME",      _CONFIG_DEFAULTS["MODELS_DIR_NAME"])
+STL_EXT              = _cfg.get("STL_EXT",              _CONFIG_DEFAULTS["STL_EXT"])
+TMF_EXT              = _cfg.get("TMF_EXT",              _CONFIG_DEFAULTS["TMF_EXT"])
+OBJ_EXT              = _cfg.get("OBJ_EXT",              _CONFIG_DEFAULTS["OBJ_EXT"])
+IGS_EXT              = _cfg.get("IGS_EXT",              _CONFIG_DEFAULTS["IGS_EXT"])
+AMF_EXT              = _cfg.get("AMF_EXT",              _CONFIG_DEFAULTS["AMF_EXT"])
+STP_EXT              = _cfg.get("STP_EXT",              _CONFIG_DEFAULTS["STP_EXT"])
+BYTES_PER_KB         = _cfg.get("BYTES_PER_KB",         _CONFIG_DEFAULTS["BYTES_PER_KB"])
+DEFAULT_SIMPLIFY     = _cfg.get("DEFAULT_SIMPLIFY",     _CONFIG_DEFAULTS["DEFAULT_SIMPLIFY"])
+SIMPLIFY_INTERACTIVE = _cfg.get("SIMPLIFY_INTERACTIVE", _CONFIG_DEFAULTS["SIMPLIFY_INTERACTIVE"])
+SKIP_EXISTING        = _cfg.get("SKIP_EXISTING",        _CONFIG_DEFAULTS["SKIP_EXISTING"])
+DEFAULT_FORMAT       = _cfg.get("DEFAULT_FORMAT",       _CONFIG_DEFAULTS["DEFAULT_FORMAT"])
+
+_cfg_warnings: list[str] = []
+for _k, _lo, _hi in [
+    ("DEFAULT_TOLERANCE",  1e-9, None),
+    ("ANGULAR_TOLERANCE",  1e-9, None),
+    ("DEFAULT_SIMPLIFY",   0,    99),
+]:
+    _v = _cfg.get(_k)
+    if _v is not None and not isinstance(_v, (int, float)):
+        _cfg_warnings.append(f"config: {_k} must be a number (got {type(_v).__name__!r})")
+    elif _v is not None:
+        if _lo is not None and _v < _lo:
+            _cfg_warnings.append(f"config: {_k} must be ≥ {_lo} (got {_v})")
+        if _hi is not None and _v > _hi:
+            _cfg_warnings.append(f"config: {_k} must be ≤ {_hi} (got {_v})")
+for _bool_k in ("SIMPLIFY_INTERACTIVE", "SKIP_EXISTING"):
+    _b = _cfg.get(_bool_k)
+    if _b is not None and not isinstance(_b, bool):
+        _cfg_warnings.append(f"config: {_bool_k} must be true or false (got {_b!r})")
+_df = _cfg.get("DEFAULT_FORMAT")
+if _df is not None and _df not in ("ap203", "ap214", "ap242"):
+    _cfg_warnings.append(f"config: DEFAULT_FORMAT must be ap203, ap214, or ap242 (got {_df!r})")
+    DEFAULT_FORMAT = "ap203"
+for _ext_k in ("STL_EXT", "TMF_EXT", "OBJ_EXT", "IGS_EXT", "AMF_EXT", "STP_EXT"):
+    _ev = _cfg.get(_ext_k)
+    if _ev is not None and (not isinstance(_ev, str) or not _ev.startswith(".")):
+        _cfg_warnings.append(f"config: {_ext_k} must start with '.' (got {_ev!r})")
 
 try:
     ctypes.windll.kernel32.SetConsoleMode(
@@ -56,8 +105,12 @@ B   = '\033[1m'
 X   = '\033[0m'
 
 
+_quiet_active = threading.Event()
+
+
 @contextmanager
 def quiet():
+    _quiet_active.set()
     sys.stdout.flush()
     sys.stderr.flush()
     fd1, fd2 = os.dup(1), os.dup(2)
@@ -76,6 +129,7 @@ def quiet():
         os.close(fd1)
         os.dup2(fd2, 2)
         os.close(fd2)
+        _quiet_active.clear()
 
 
 try:
@@ -87,6 +141,7 @@ try:
         from OCC.Core.ShapeUpgrade import ShapeUpgrade_UnifySameDomain
         from OCC.Core.ShapeFix import ShapeFix_Shape
         from OCC.Core.STEPControl import STEPControl_Writer, STEPControl_AsIs
+        from OCC.Core.Interface import Interface_Static
         from OCC.Core.IGESControl import IGESControl_Reader
         from OCC.Core.IFSelect import IFSelect_RetDone, IFSelect_RetError, IFSelect_RetFail
         from OCC.Core.TopoDS import TopoDS_Shape, TopoDS_Compound
@@ -104,7 +159,7 @@ _STL_TRI = struct.Struct("<12fH")
 _SUPPORTED_EXTS = {STL_EXT, TMF_EXT, OBJ_EXT, AMF_EXT, IGS_EXT, ".iges"}
 
 _BOX_CONTENT = 72
-_BOX_LABEL   = 10
+_BOX_LABEL   = 12
 _BOX_TIME    = 6
 _BOX_DETAIL  = _BOX_CONTENT - _BOX_LABEL - 2 - _BOX_TIME
 
@@ -349,52 +404,7 @@ def _parallel_sew(shape, tolerance):
     return sewn, final_sew.NbFreeEdges()
 
 
-def _collect_shells(shape):
-    shells = []
-    exp = TopExp_Explorer(shape, TopAbs_SHELL)
-    while exp.More():
-        shells.append(exp.Current())
-        exp.Next()
-    return shells
-
-
-def _combine_shapes(shapes):
-    builder = BRep_Builder()
-    compound = TopoDS_Compound()
-    builder.MakeCompound(compound)
-    for s in shapes:
-        builder.Add(compound, s)
-    return compound
-
-
-def _fix_shell(shell):
-    try:
-        fix = ShapeFix_Shape(shell)
-        fix.Perform()
-        result = fix.Shape()
-        return result if not result.IsNull() else shell
-    except Exception:
-        return shell
-
-
-def _parallel_fix(shape):
-    shells = _collect_shells(shape)
-    n_threads = os.cpu_count() or 1
-    if len(shells) < 2 or n_threads < 2:
-        try:
-            fix = ShapeFix_Shape(shape)
-            fix.Perform()
-            result = fix.Shape()
-            return result if not result.IsNull() else shape
-        except Exception:
-            return shape
-    with ThreadPoolExecutor(max_workers=min(n_threads, len(shells))) as executor:
-        results = list(executor.map(_fix_shell, shells))
-    results = [r for r in results if r is not None and not r.IsNull()]
-    return _combine_shapes(results) if results else shape
-
-
-def _parallel_refine(shape, tolerance):
+def _run_brep_subprocess(shape, make_script):
     fd_in,  in_path  = tempfile.mkstemp(suffix='.brep')
     fd_out, out_path = tempfile.mkstemp(suffix='.brep')
     os.close(fd_in)
@@ -403,22 +413,8 @@ def _parallel_refine(shape, tolerance):
     out_fwd = out_path.replace('\\', '/')
     try:
         breptools.Write(shape, in_fwd)
-        script = (
-            "from OCC.Core.BRepTools import breptools;"
-            "from OCC.Core.BRep import BRep_Builder;"
-            "from OCC.Core.TopoDS import TopoDS_Shape;"
-            "from OCC.Core.ShapeUpgrade import ShapeUpgrade_UnifySameDomain;"
-            "b=BRep_Builder();s=TopoDS_Shape();"
-            f"breptools.Read(s,'{in_fwd}',b);"
-            f"u=ShapeUpgrade_UnifySameDomain(s,True,True,True);"
-            f"u.SetLinearTolerance({tolerance});"
-            f"u.SetAngularTolerance({ANGULAR_TOLERANCE});"
-            "u.Build();"
-            "r=u.Shape();"
-            f"breptools.Write(r if not r.IsNull() else s,'{out_fwd}')"
-        )
         proc = subprocess.run(
-            [sys.executable, '-c', script],
+            [sys.executable, '-c', make_script(in_fwd, out_fwd)],
             capture_output=True,
             timeout=300,
         )
@@ -438,7 +434,46 @@ def _parallel_refine(shape, tolerance):
     return shape
 
 
-_step_open = [False]
+def _parallel_fix(shape):
+    def make_script(in_fwd, out_fwd):
+        return (
+            "from OCC.Core.BRepTools import breptools;"
+            "from OCC.Core.BRep import BRep_Builder;"
+            "from OCC.Core.TopoDS import TopoDS_Shape;"
+            "from OCC.Core.ShapeFix import ShapeFix_Shape;"
+            "b=BRep_Builder();s=TopoDS_Shape();"
+            f"breptools.Read(s,'{in_fwd}',b);"
+            "f=ShapeFix_Shape(s);f.Perform();r=f.Shape();"
+            f"breptools.Write(r if not r.IsNull() else s,'{out_fwd}')"
+        )
+    return _run_brep_subprocess(shape, make_script)
+
+
+def _parallel_refine(shape, tolerance):
+    def make_script(in_fwd, out_fwd):
+        return (
+            "from OCC.Core.BRepTools import breptools;"
+            "from OCC.Core.BRep import BRep_Builder;"
+            "from OCC.Core.TopoDS import TopoDS_Shape;"
+            "from OCC.Core.ShapeUpgrade import ShapeUpgrade_UnifySameDomain;"
+            "b=BRep_Builder();s=TopoDS_Shape();"
+            f"breptools.Read(s,'{in_fwd}',b);"
+            f"u=ShapeUpgrade_UnifySameDomain(s,True,True,True);"
+            f"u.SetLinearTolerance({tolerance});"
+            f"u.SetAngularTolerance({ANGULAR_TOLERANCE});"
+            "u.Build();"
+            "r=u.Shape();"
+            f"breptools.Write(r if not r.IsNull() else s,'{out_fwd}')"
+        )
+    return _run_brep_subprocess(shape, make_script)
+
+
+_step_open   = [False]
+_timer_label = [""]
+_timer_t0    = [0.0]
+_timer_stop  = threading.Event()
+_timer_th    = [None]
+_TIMER_PAD   = _BOX_DETAIL + _BOX_TIME + 2
 
 
 def _box_top():
@@ -461,32 +496,59 @@ def _box_row(left: str, right: str = "", lc: str = "", rc: str = "") -> None:
     print(f"  {DIM}│{X}  {lc}{left}{X}{' ' * gap}{rc}{right}{X}  {DIM}│{X}")
 
 
+def _stop_timer() -> None:
+    _timer_stop.set()
+    t = _timer_th[0]
+    if t is not None:
+        t.join(timeout=1.0)
+        _timer_th[0] = None
+
+
 def _step_start(label: str) -> float:
-    _step_open[0] = True
+    _step_open[0]   = True
+    _timer_label[0] = label
+    t0 = time.perf_counter()
+    _timer_t0[0]    = t0
+    _timer_stop.clear()
     print(f"  {DIM}│{X}  {DIM}{label:<{_BOX_LABEL}}", end="", flush=True)
-    return time.perf_counter()
+
+    def _tick():
+        while not _timer_stop.wait(0.5):
+            if not _quiet_active.is_set():
+                t_str = _fmt_time(time.perf_counter() - _timer_t0[0])
+                print(f"\r  {DIM}│{X}  {DIM}{label:<{_BOX_LABEL}}{DIM}{t_str:>{_TIMER_PAD}}{X}\033[K",
+                      end="", flush=True)
+
+    _timer_th[0] = threading.Thread(target=_tick, daemon=True)
+    _timer_th[0].start()
+    return t0
 
 
 def _step_end(t0: float, detail: str = "") -> None:
+    _stop_timer()
     _step_open[0] = False
     elapsed = time.perf_counter() - t0
     if len(detail) > _BOX_DETAIL:
         detail = detail[:_BOX_DETAIL - 3] + "..."
     time_str = _fmt_time(elapsed)
-    print(f"{X}{C}{detail:<{_BOX_DETAIL}}{X}  {Y}{time_str:>{_BOX_TIME}}{X}  {DIM}│{X}")
+    print(f"\r  {DIM}│{X}  {DIM}{_timer_label[0]:<{_BOX_LABEL}}{X}{C}{detail:<{_BOX_DETAIL}}{X}  {Y}{time_str:>{_BOX_TIME}}{X}  {DIM}│{X}")
 
 
 def _step_fail() -> None:
     if _step_open[0]:
+        _stop_timer()
         _step_open[0] = False
-        print(f"{X}{R}{'error':<{_BOX_DETAIL}}{X}  {R}{'failed':>{_BOX_TIME}}{X}  {DIM}│{X}")
+        print(f"\r  {DIM}│{X}  {DIM}{_timer_label[0]:<{_BOX_LABEL}}{X}{R}{'error':<{_BOX_DETAIL}}{X}  {R}{'failed':>{_BOX_TIME}}{X}  {DIM}│{X}")
 
 
 def _trim(name: str, width: int = NAME_TRIM_WIDTH) -> str:
     return name if len(name) <= width else name[:width - 3] + "..."
 
 
-_EST_HISTORY = Path(__file__).parent / "estimator.json"
+_EST_HISTORY = _DATA_DIR / "estimator.json"
+_old_est = Path(__file__).parent / "estimator.json"
+if not _EST_HISTORY.exists() and _old_est.exists():
+    _EST_HISTORY.write_bytes(_old_est.read_bytes())
 _EST_MIN     = 5
 _EST_POWERS  = (2, 1, 0)
 
@@ -620,12 +682,183 @@ def _show_post_sew_estimate(n_faces: int, fmt: str = None) -> None:
     _box_sep()
 
 
-def convert(input_path: Path, output_path: Path, tolerance: float = DEFAULT_TOLERANCE):
+def _simplify_prompt(default_fraction, n_tris=None, batch=False):
+    pct = int(round((1.0 - default_fraction) * 100)) if default_fraction else 0
+    hint = ""
+    if n_tris is not None and default_fraction:
+        hint = f"  {DIM}({n_tris:,} → ~{max(1, int(n_tris * default_fraction)):,}){X}"
+    batch_hint = f"  {DIM}[!N = all files]{X}" if batch else ""
+    raw = input(f"  {DIM}│{X}  {DIM}{'simplify':<{_BOX_LABEL}}{X}{Y}{pct}%{X}{hint}{batch_hint}  ").strip()
+    _box_sep()
+    lock_all = raw.startswith("!")
+    if lock_all:
+        raw = raw[1:].strip()
+    fraction = _parse_simplify(raw) if raw else default_fraction
+    return fraction, lock_all
+
+
+def _parse_simplify(value: str):
+    if not value:
+        return None
+    try:
+        pct = float(value.strip().rstrip('%'))
+        if pct <= 0 or pct >= 100:
+            return None
+        return (100.0 - min(99.0, pct)) / 100.0
+    except ValueError:
+        return None
+
+
+def _load_mesh_arrays(path: Path):
+    import numpy as np
+    ext = path.suffix.lower()
+
+    if ext == STL_EXT:
+        with open(path, 'rb') as f:
+            f.seek(80)
+            n = struct.unpack('<I', f.read(4))[0]
+            data = f.read()
+        if len(data) == n * 50:
+            stl_dt = np.dtype([('n', np.float32, (3,)), ('v0', np.float32, (3,)),
+                                ('v1', np.float32, (3,)), ('v2', np.float32, (3,)),
+                                ('attr', np.uint16)])
+            tris = np.frombuffer(data, dtype=stl_dt)
+            verts = np.stack([tris['v0'], tris['v1'], tris['v2']], axis=1).reshape(-1, 3)
+            return verts.astype(np.float32), np.arange(n * 3, dtype=np.int32).reshape(n, 3)
+        verts = []
+        with open(path, 'r', encoding='utf-8', errors='replace') as f:
+            for line in f:
+                p = line.split()
+                if p and p[0] == 'vertex':
+                    verts.append([float(p[1]), float(p[2]), float(p[3])])
+        v = np.array(verts, dtype=np.float32)
+        return v, np.arange(len(v), dtype=np.int32).reshape(-1, 3)
+
+    if ext == TMF_EXT:
+        with zipfile.ZipFile(str(path)) as zf:
+            with zf.open(_find_3mf_model(zf)) as f:
+                root = ET.parse(f).getroot()
+        resources = root.find(f"{{{_3MF_NS}}}resources")
+        verts_all, tris_all, offset = [], [], 0
+        for obj in resources.findall(f"{{{_3MF_NS}}}object"):
+            mesh_el = obj.find(f"{{{_3MF_NS}}}mesh")
+            if mesh_el is None:
+                continue
+            ve = mesh_el.find(f"{{{_3MF_NS}}}vertices")
+            te = mesh_el.find(f"{{{_3MF_NS}}}triangles")
+            if ve is None or te is None:
+                continue
+            verts = [(float(v.get('x')), float(v.get('y')), float(v.get('z')))
+                     for v in ve.findall(f"{{{_3MF_NS}}}vertex")]
+            tris_all += [(int(t.get('v1')) + offset, int(t.get('v2')) + offset,
+                          int(t.get('v3')) + offset)
+                         for t in te.findall(f"{{{_3MF_NS}}}triangle")]
+            verts_all += verts
+            offset += len(verts)
+        return np.array(verts_all, dtype=np.float32), np.array(tris_all, dtype=np.int32)
+
+    if ext == OBJ_EXT:
+        verts, tris = [], []
+        with open(path, 'r', encoding='utf-8', errors='replace') as f:
+            for line in f:
+                p = line.split()
+                if not p:
+                    continue
+                if p[0] == 'v':
+                    verts.append([float(p[1]), float(p[2]), float(p[3])])
+                elif p[0] == 'f':
+                    idx = [(len(verts) + int(x.split('/')[0])) if int(x.split('/')[0]) < 0
+                           else (int(x.split('/')[0]) - 1) for x in p[1:]]
+                    for i in range(1, len(idx) - 1):
+                        tris.append([idx[0], idx[i], idx[i + 1]])
+        return np.array(verts, dtype=np.float32), np.array(tris, dtype=np.int32)
+
+    if ext == AMF_EXT:
+        raw = path.read_bytes()
+        if raw[:2] == b'PK':
+            with zipfile.ZipFile(str(path)) as zf:
+                names = zf.namelist()
+                target = next((n for n in names if n.endswith('.amf')), names[0])
+                with zf.open(target) as f:
+                    root = ET.parse(f).getroot()
+        else:
+            root = ET.fromstring(raw)
+        verts_all, tris_all, offset = [], [], 0
+        for obj in root.findall('object'):
+            mesh_el = obj.find('mesh')
+            if mesh_el is None:
+                continue
+            ve = mesh_el.find('vertices')
+            if ve is None:
+                continue
+            verts = []
+            for vertex in ve.findall('vertex'):
+                coords = vertex.find('coordinates')
+                if coords is None:
+                    continue
+                verts.append([float(coords.findtext('x', '0')),
+                               float(coords.findtext('y', '0')),
+                               float(coords.findtext('z', '0'))])
+            for volume in mesh_el.findall('volume'):
+                for tri in volume.findall('triangle'):
+                    tris_all.append([int(tri.findtext('v1')) + offset,
+                                     int(tri.findtext('v2')) + offset,
+                                     int(tri.findtext('v3')) + offset])
+            verts_all += verts
+            offset += len(verts)
+        return np.array(verts_all, dtype=np.float32), np.array(tris_all, dtype=np.int32)
+
+    raise ValueError(f"unsupported format for simplification: {path.suffix}")
+
+
+def _write_simplified_stl(path: Path, verts, faces):
+    n = len(faces)
+    buf = bytearray(80 + 4 + n * _STL_TRI.size)
+    struct.pack_into('<I', buf, 80, n)
+    for i, tri in enumerate(faces):
+        v0, v1, v2 = verts[tri[0]], verts[tri[1]], verts[tri[2]]
+        _STL_TRI.pack_into(buf, 84 + i * _STL_TRI.size, 0.0, 0.0, 0.0, *v0, *v1, *v2, 0)
+    path.write_bytes(bytes(buf))
+
+
+def _simplify_mesh(path: Path, keep_fraction: float):
+    import fast_simplification
+    import numpy as np
+
+    verts, faces = _load_mesh_arrays(path)
+    n_before = len(faces)
+    if n_before == 0:
+        raise ValueError("mesh is empty")
+    target_reduction = max(0.01, min(0.99, 1.0 - keep_fraction))
+    verts_out, faces_out = fast_simplification.simplify(
+        verts.astype(np.float32),
+        faces.astype(np.int32),
+        target_reduction,
+    )
+    n_after = len(faces_out)
+    fd, tmp = tempfile.mkstemp(suffix='.stl')
+    os.close(fd)
+    _write_simplified_stl(Path(tmp), verts_out, faces_out)
+    return Path(tmp), n_before, n_after
+
+
+_STEP_SCHEMAS = {"ap203": "AP203", "ap214": "AP214IS", "ap242": "AP242DIS"}
+
+
+def convert(input_path: Path, output_path: Path, tolerance: float = DEFAULT_TOLERANCE,
+            simplify_fraction=None, interactive: bool = False,
+            batch: bool = False, _chosen_out: dict = None,
+            step_schema: str = "AP203", _suppress_read_step: bool = False):
     n_verts = n_tris = None
+    _tmp_simplified = None
+    original_path = input_path
 
     try:
-        t = _step_start("reading")
         ext = input_path.suffix.lower()
+        original_ext = ext
+
+        if not _suppress_read_step:
+            t = _step_start("reading")
         if ext == TMF_EXT:
             shape, n_verts, n_tris = _read_3mf_shape(input_path)
         elif ext == OBJ_EXT:
@@ -640,16 +873,44 @@ def convert(input_path: Path, output_path: Path, tolerance: float = DEFAULT_TOLE
                 StlAPI_Reader().Read(shape, input_path.as_posix())
             n_tris = _stl_tri_count(input_path)
         if shape.IsNull():
-            _step_fail()
+            if not _suppress_read_step:
+                _step_fail()
             return False, "input produced an empty shape"
-        read_parts = []
-        if n_verts is not None:
-            read_parts.append(f"{n_verts:,} vertices")
-        if n_tris is not None:
-            read_parts.append(f"{n_tris:,} triangles")
-        if not read_parts:
-            read_parts.append(f"{_count_topo(shape, TopAbs_FACE):,} faces")
-        _step_end(t, "  ·  ".join(read_parts))
+        if not _suppress_read_step:
+            read_parts = []
+            if n_verts is not None:
+                read_parts.append(f"{n_verts:,} vertices")
+            if n_tris is not None:
+                read_parts.append(f"{n_tris:,} triangles")
+            if not read_parts:
+                read_parts.append(f"{_count_topo(shape, TopAbs_FACE):,} faces")
+            _step_end(t, " · ".join(read_parts))
+
+        if interactive and original_ext not in {IGS_EXT, ".iges"}:
+            _box_sep()
+            simplify_fraction, _lock_all = _simplify_prompt(
+                simplify_fraction, n_tris=n_tris, batch=batch)
+            if _chosen_out is not None:
+                _chosen_out['fraction'] = simplify_fraction
+                _chosen_out['lock'] = _lock_all
+
+        if simplify_fraction is not None and original_ext not in {IGS_EXT, ".iges"}:
+            t = _step_start("simplify")
+            try:
+                _tmp_simplified, n_before, n_after = _simplify_mesh(original_path, simplify_fraction)
+                red_pct = int(round((1.0 - n_after / n_before) * 100))
+                _new_shape = TopoDS_Shape()
+                with quiet():
+                    StlAPI_Reader().Read(_new_shape, _tmp_simplified.as_posix())
+                if _new_shape.IsNull():
+                    raise ValueError("simplified STL produced an empty shape")
+                _step_end(t, f"{n_before:,} → {n_after:,} triangles  (-{red_pct}%)")
+                shape = _new_shape
+                n_tris = n_after
+            except ImportError as e:
+                _step_end(t, f"skipped  ({e})")
+            except Exception as e:
+                _step_end(t, f"skipped  ({e})")
 
         t = _step_start("sewing")
         with quiet():
@@ -662,10 +923,10 @@ def convert(input_path: Path, output_path: Path, tolerance: float = DEFAULT_TOLE
         sew_parts = [f"{n_shells:,} shell{'s' if n_shells != 1 else ''}"]
         if n_free:
             sew_parts.append(f"{n_free:,} free edge{'s' if n_free != 1 else ''}")
-        _step_end(t, "  ·  ".join(sew_parts))
+        _step_end(t, " · ".join(sew_parts))
 
         t_post_sew = time.perf_counter()
-        _show_post_sew_estimate(n_faces_sewn, fmt=ext)
+        _show_post_sew_estimate(n_faces_sewn, fmt=original_ext)
 
         t = _step_start("fixing")
         with quiet():
@@ -680,6 +941,7 @@ def convert(input_path: Path, output_path: Path, tolerance: float = DEFAULT_TOLE
         _step_end(t, f"{n_faces_out:,} to {n_faces_after:,} faces")
 
         t = _step_start("writing")
+        Interface_Static.SetCVal("write.step.schema", step_schema)
         writer = STEPControl_Writer()
         with quiet():
             ts = writer.Transfer(refined, STEPControl_AsIs)
@@ -695,7 +957,7 @@ def convert(input_path: Path, output_path: Path, tolerance: float = DEFAULT_TOLE
         _step_end(t, f"{out_kb:,} KB")
 
         topo = _topo_counts(refined)
-        _rec_post_sew(ext, n_faces_sewn, time.perf_counter() - t_post_sew)
+        _rec_post_sew(original_ext, n_faces_sewn, time.perf_counter() - t_post_sew)
         return True, {
             "kb":    out_kb,
             "verts": n_verts,
@@ -708,17 +970,208 @@ def convert(input_path: Path, output_path: Path, tolerance: float = DEFAULT_TOLE
         _step_fail()
         return False, traceback.format_exc().strip()
 
+    finally:
+        if _tmp_simplified is not None:
+            try:
+                _tmp_simplified.unlink()
+            except Exception:
+                pass
+
 
 def models_dir() -> Path:
     return Path(__file__).parent / MODELS_DIR_NAME
 
 
+def _err_line(tb: str) -> str:
+    lines = [l for l in tb.splitlines() if l.strip()]
+    return lines[-1] if lines else tb
+
+
+def _quick_tri_count(path: Path):
+    ext = path.suffix.lower()
+    if ext == STL_EXT:
+        return _stl_tri_count(path)
+    if ext == TMF_EXT:
+        try:
+            with zipfile.ZipFile(str(path)) as zf:
+                model_file = _find_3mf_model(zf)
+                with zf.open(model_file) as f:
+                    root = ET.parse(f).getroot()
+            return sum(1 for _ in root.iter(f"{{{_3MF_NS}}}triangle")) or None
+        except Exception:
+            return None
+    if ext == OBJ_EXT:
+        try:
+            count = 0
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    if line.startswith("f ") or line.startswith("f\t"):
+                        count += max(1, len(line.split()) - 3)
+            return count or None
+        except Exception:
+            return None
+    if ext == AMF_EXT:
+        try:
+            raw = path.read_bytes()
+            if raw[:2] == b"PK":
+                with zipfile.ZipFile(str(path)) as zf:
+                    names = zf.namelist()
+                    target = next((n for n in names if n.endswith(".amf")), names[0])
+                    with zf.open(target) as f:
+                        root = ET.parse(f).getroot()
+            else:
+                root = ET.fromstring(raw)
+            return sum(1 for _ in root.iter("triangle")) or None
+        except Exception:
+            return None
+    return None
+
+
+def _make_output_path(src: Path, base_dir: Path, fraction, ext: str) -> Path:
+    stem = src.stem
+    if fraction:
+        reduction_pct = int(round((1.0 - fraction) * 100))
+        stem = f"{stem} [{reduction_pct}]"
+    return base_dir / (stem + ext)
+
+
+def _run_batch(files, n, out_dir, args, simplify_fraction, step_schema, label_prefix=True):
+    ok_n = fail_n = skip_n = 0
+    _lock_frac = None
+
+    for i, src_file in enumerate(files):
+        base_dir = out_dir or src_file.parent
+        _is_interactive = SIMPLIFY_INTERACTIVE and not args.simplify and _lock_frac is None
+        eff_fraction = _lock_frac if _lock_frac is not None else simplify_fraction
+
+        src_kb = src_file.stat().st_size // BYTES_PER_KB
+        size_str = f"{src_kb:,} KB"
+        prefix = f"[{i+1}/{n}]  " if label_prefix else ""
+        name_trim = _BOX_CONTENT - len(size_str) - len(prefix) - 1
+
+        if _is_interactive and not getattr(args, 'dry_run', False):
+            _box_top()
+            _box_row(f"{prefix}{_trim(src_file.name, name_trim)}", size_str, lc=B, rc=DIM)
+            _box_sep()
+            _t_read = _step_start("reading")
+            n_tris_preview = _quick_tri_count(src_file)
+            _read_detail = f"{n_tris_preview:,} triangles" if n_tris_preview is not None else ""
+            _step_end(_t_read, _read_detail)
+            _box_sep()
+            chosen_frac, lock_all = _simplify_prompt(eff_fraction, n_tris=n_tris_preview, batch=True)
+            if lock_all:
+                _lock_frac = chosen_frac
+            out_file = _make_output_path(src_file, base_dir, chosen_frac, STP_EXT)
+            _up_to_date = (SKIP_EXISTING and not args.force
+                           and out_file.exists()
+                           and out_file.stat().st_mtime >= src_file.stat().st_mtime)
+            if _up_to_date:
+                _skip_kb = out_file.stat().st_size // BYTES_PER_KB
+                _skip_str = f"{_skip_kb:,} KB"
+                _box_row(f"✓  {_trim(out_file.name, _BOX_CONTENT - len(_skip_str) - 3)}", _skip_str, lc=f"{G}{B}", rc=G)
+                _box_bot()
+                print()
+                skip_n += 1
+                continue
+            _t0 = time.perf_counter()
+            success, info = convert(src_file, out_file, args.tolerance, chosen_frac,
+                                    step_schema=step_schema, _suppress_read_step=True)
+            _elapsed = time.perf_counter() - _t0
+            _box_sep()
+            if success:
+                out_str = f"{info['kb']:,} KB · {_fmt_time(_elapsed)}"
+                _box_row(f"✓  {_trim(out_file.name, _BOX_CONTENT - len(out_str) - 3)}", out_str, lc=f"{G}{B}", rc=G)
+                ok_n += 1
+            else:
+                _box_row(f"✗  {_err_line(info)}", lc=R)
+                fail_n += 1
+            _box_bot()
+            print()
+            continue
+
+        out_file = _make_output_path(src_file, base_dir, eff_fraction, STP_EXT)
+        _up_to_date = (SKIP_EXISTING and not args.force
+                       and out_file.exists()
+                       and out_file.stat().st_mtime >= src_file.stat().st_mtime)
+
+        if getattr(args, 'dry_run', False):
+            if _up_to_date:
+                print(f"  {DIM}↷  {_trim(src_file.name)}  up-to-date{X}")
+                skip_n += 1
+            else:
+                print(f"  {C}→  {_trim(src_file.name)}  {src_kb:,} KB → {out_file.name}{X}")
+                ok_n += 1
+            continue
+
+        _box_top()
+        _box_row(f"{prefix}{_trim(src_file.name, name_trim)}", size_str, lc=B, rc=DIM)
+        _box_sep()
+
+        if _up_to_date:
+            _skip_kb = out_file.stat().st_size // BYTES_PER_KB
+            _skip_str = f"{_skip_kb:,} KB"
+            _box_row(f"✓  {_trim(out_file.name, _BOX_CONTENT - len(_skip_str) - 3)}", _skip_str, lc=f"{G}{B}", rc=G)
+            _box_bot()
+            print()
+            skip_n += 1
+            continue
+
+        _t0 = time.perf_counter()
+        success, info = convert(src_file, out_file, args.tolerance, eff_fraction,
+                                step_schema=step_schema)
+        _elapsed = time.perf_counter() - _t0
+        _box_sep()
+        if success:
+            out_str = f"{info['kb']:,} KB · {_fmt_time(_elapsed)}"
+            _box_row(f"✓  {_trim(out_file.name, _BOX_CONTENT - len(out_str) - 3)}", out_str, lc=f"{G}{B}", rc=G)
+            ok_n += 1
+        else:
+            _box_row(f"✗  {_err_line(info)}", lc=R)
+            fail_n += 1
+        _box_bot()
+        print()
+
+    return ok_n, fail_n, skip_n
+
+
+def _print_summary(ok_n, fail_n, skip_n, dry_run=False):
+    print(f"  {DIM}{'─' * SEPARATOR_WIDTH}{X}")
+    if fail_n == 0 and skip_n == 0:
+        verb = "would convert" if dry_run else "converted"
+        print(f"  {G}{B}✓  All {ok_n} file{'s' if ok_n > 1 else ''} {verb} successfully{X}")
+    else:
+        _parts = []
+        if ok_n:   _parts.append(f"{G}✓  {ok_n} {'would convert' if dry_run else 'converted'}{X}")
+        if skip_n: _parts.append(f"{DIM}↷  {skip_n} skipped{X}")
+        if fail_n: _parts.append(f"{R}✗  {fail_n} failed{X}")
+        print(f"  {'    '.join(_parts)}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Convert to STEP.")
-    parser.add_argument("input",  nargs="?")
-    parser.add_argument("output", nargs="?")
+    parser.add_argument("input", nargs="*",
+        help="input file(s); omit to convert everything in the models/ folder")
+    parser.add_argument("--output", "-o", metavar="FILE",
+        help="output path (single-file mode only)")
+    parser.add_argument("--output-dir", "-d", metavar="DIR",
+        help="write output files to this directory instead of alongside the source")
     parser.add_argument("--tolerance", "-t", type=float, default=DEFAULT_TOLERANCE)
+    parser.add_argument("--simplify", "-s", metavar="PCT",
+        help="keep this %% of triangles before converting (0 = off)")
+    parser.add_argument("--format", metavar="SCHEMA", default=DEFAULT_FORMAT,
+        choices=["ap203", "ap214", "ap242"],
+        help=f"STEP schema: ap203, ap214, ap242 (default: {DEFAULT_FORMAT})")
+    parser.add_argument("--force", "-f", action="store_true",
+        help="re-convert files even if the output is already up-to-date")
+    parser.add_argument("--dry-run", "--dry", action="store_true",
+        help="show what would be converted without actually converting")
+    parser.add_argument("--watch", "-w", action="store_true",
+        help="after batch conversion, watch the folder and convert new files automatically")
     args = parser.parse_args()
+
+    simplify_fraction = (_parse_simplify(args.simplify) if args.simplify
+                         else ((100.0 - DEFAULT_SIMPLIFY) / 100.0 if 0 < DEFAULT_SIMPLIFY < 100 else None))
+    step_schema = _STEP_SCHEMAS.get(args.format, "AP203")
 
     print()
     _w = _BOX_CONTENT + 4
@@ -727,84 +1180,146 @@ def main():
     print(f"  {C}{B}╚{'═' * _w}╝{X}")
     print()
 
-    if args.input is None:
-        folder = models_dir()
-        folder.mkdir(exist_ok=True)
+    if _cfg_warnings:
+        for _w_msg in _cfg_warnings:
+            print(f"  {Y}⚠  {_w_msg}{X}")
+        print()
 
-        files = sorted(f for f in folder.iterdir() if f.suffix.lower() in _SUPPORTED_EXTS)
-        if not files:
-            print(f"  No supported files found in {MODELS_DIR_NAME}\\\n")
-            input("  Press Enter to exit...")
-            sys.exit(0)
+    out_dir = Path(args.output_dir).resolve() if args.output_dir else None
+    if out_dir is not None:
+        out_dir.mkdir(parents=True, exist_ok=True)
 
-        n = len(files)
-        print(f"  {n} file{'s' if n > 1 else ''} found in {C}{MODELS_DIR_NAME}\\{X}\n")
-
-        tasks = [(f, f.with_suffix(STP_EXT), args.tolerance) for f in files]
-        ok_n = fail_n = 0
-
-        for i, (src_file, out_file, tol) in enumerate(tasks):
-            src_kb = src_file.stat().st_size // BYTES_PER_KB
-            size_str = f"{src_kb:,} KB"
-            _box_top()
-            _box_row(f"[{i+1}/{n}]  {_trim(src_file.name, _BOX_CONTENT - len(size_str) - 3)}", size_str, lc=B, rc=DIM)
-            _box_sep()
-            _t0 = time.perf_counter()
-            success, info = convert(src_file, out_file, tol)
-            _elapsed = time.perf_counter() - _t0
-            _box_sep()
-            if success:
-                out_str = f"{info['kb']:,} KB  ·  {_fmt_time(_elapsed)}"
-                _box_row(f"✓  {_trim(out_file.name, _BOX_CONTENT - len(out_str) - 3)}", out_str, lc=f"{G}{B}", rc=G)
-                ok_n += 1
+    if len(args.input) > 1:
+        files = []
+        for p in args.input:
+            fp = Path(p).resolve()
+            if not fp.exists():
+                print(f"  {R}[ERROR]{X} File not found: {fp}")
+            elif fp.suffix.lower() not in _SUPPORTED_EXTS:
+                print(f"  {R}[ERROR]{X} Unsupported format: {fp.name}")
             else:
-                _box_row(f"✗  {info.split(chr(10))[-1]}", lc=R)
-                fail_n += 1
-            _box_bot()
-            print()
-
-        print(f"  {DIM}{'─' * SEPARATOR_WIDTH}{X}")
-        if fail_n == 0:
-            print(f"  {G}{B}✓  All {ok_n} file{'s' if ok_n > 1 else ''} converted successfully{X}")
-        else:
-            print(f"  {G}✓  {ok_n} converted{X}    {R}✗  {fail_n} failed{X}")
+                files.append(fp)
+        if not files:
+            sys.exit(1)
+        n = len(files)
+        print(f"  {n} file{'s' if n > 1 else ''} to convert\n")
+        ok_n, fail_n, skip_n = _run_batch(files, n, out_dir, args, simplify_fraction, step_schema)
+        _print_summary(ok_n, fail_n, skip_n, dry_run=args.dry_run)
         print()
         input("  Press Enter to exit...")
         sys.exit(0 if fail_n == 0 else 1)
 
-    input_path = Path(args.input).resolve()
-    if not input_path.exists():
-        print(f"  {R}[ERROR]{X} File not found: {input_path}\n")
+    if len(args.input) == 1:
+        input_path = Path(args.input[0]).resolve()
+        if not input_path.exists():
+            print(f"  {R}[ERROR]{X} File not found: {input_path}\n")
+            input("  Press Enter to exit...")
+            sys.exit(1)
+
+        _single_interactive = SIMPLIFY_INTERACTIVE and not args.simplify
+        _single_base_dir = out_dir or input_path.parent
+
+        if args.output:
+            out = Path(args.output)
+            output_path = input_path.parent / out if not out.is_absolute() else out
+        else:
+            output_path = _make_output_path(input_path, _single_base_dir, simplify_fraction, STP_EXT)
+
+        src_kb = input_path.stat().st_size // BYTES_PER_KB
+        size_str = f"{src_kb:,} KB"
+
+        if args.dry_run:
+            if SKIP_EXISTING and not args.force and output_path.exists() and output_path.stat().st_mtime >= input_path.stat().st_mtime:
+                print(f"  {DIM}↷  {_trim(input_path.name)}  up-to-date{X}\n")
+            else:
+                print(f"  {C}→  {_trim(input_path.name)}  {src_kb:,} KB → {output_path.name}{X}\n")
+            input("  Press Enter to exit...")
+            sys.exit(0)
+
+        _box_top()
+        _box_row(f"[1/1]  {_trim(input_path.name, _BOX_CONTENT - len(size_str) - 3)}", size_str, lc=B, rc=DIM)
+        _box_sep()
+        _chosen = {}
+        _t0 = time.perf_counter()
+        success, info = convert(input_path, output_path, args.tolerance, simplify_fraction,
+                                interactive=_single_interactive,
+                                _chosen_out=_chosen if _single_interactive else None,
+                                step_schema=step_schema)
+        if _single_interactive and success and _chosen and not args.output:
+            chosen_frac = _chosen.get('fraction')
+            new_out = _make_output_path(input_path, _single_base_dir, chosen_frac, STP_EXT)
+            if new_out != output_path:
+                try:
+                    output_path.rename(new_out)
+                    output_path = new_out
+                except Exception:
+                    pass
+        _elapsed = time.perf_counter() - _t0
+        _box_sep()
+        if success:
+            out_str = f"{info['kb']:,} KB · {_fmt_time(_elapsed)}"
+            _box_row(f"✓  {_trim(output_path.name, _BOX_CONTENT - len(out_str) - 3)}", out_str, lc=f"{G}{B}", rc=G)
+        else:
+            _box_row(f"✗  {_err_line(info)}", lc=R)
+        _box_bot()
+        print()
+        if success:
+            print(f"  {G}{B}✓  Done{X}")
+        print()
         input("  Press Enter to exit...")
-        sys.exit(1)
+        sys.exit(0 if success else 1)
 
-    if args.output:
-        out = Path(args.output)
-        output_path = input_path.parent / out if not out.is_absolute() else out
-    else:
-        output_path = input_path.with_suffix(STP_EXT)
+    folder = models_dir()
+    folder.mkdir(exist_ok=True)
 
-    src_kb = input_path.stat().st_size // BYTES_PER_KB
-    size_str = f"{src_kb:,} KB"
-    _box_top()
-    _box_row(f"[1/1]  {_trim(input_path.name, _BOX_CONTENT - len(size_str) - 3)}", size_str, lc=B, rc=DIM)
-    _box_sep()
-    _t0 = time.perf_counter()
-    success, info = convert(input_path, output_path, args.tolerance)
-    _elapsed = time.perf_counter() - _t0
-    _box_sep()
-    if success:
-        out_str = f"{info['kb']:,} KB  ·  {_fmt_time(_elapsed)}"
-        _box_row(f"✓  {_trim(output_path.name, _BOX_CONTENT - len(out_str) - 3)}", out_str, lc=f"{G}{B}", rc=G)
+    files = sorted(f for f in folder.iterdir() if f.suffix.lower() in _SUPPORTED_EXTS)
+    if not files:
+        print(f"  No supported files found in {MODELS_DIR_NAME}\\\n")
+        input("  Press Enter to exit...")
+        sys.exit(0)
+
+    n = len(files)
+    print(f"  {n} file{'s' if n > 1 else ''} found in {C}{MODELS_DIR_NAME}\\{X}\n")
+
+    ok_n, fail_n, skip_n = _run_batch(files, n, out_dir, args, simplify_fraction, step_schema)
+    _print_summary(ok_n, fail_n, skip_n, dry_run=args.dry_run)
+    print()
+
+    if args.watch and not args.dry_run:
+        known = {f.name for f in folder.iterdir() if f.suffix.lower() in _SUPPORTED_EXTS}
+        print(f"  {DIM}Watching {C}{MODELS_DIR_NAME}\\{X}{DIM}  Ctrl+C to stop{X}\n")
+        try:
+            while True:
+                time.sleep(2)
+                current = {f.name for f in folder.iterdir() if f.suffix.lower() in _SUPPORTED_EXTS}
+                new_names = current - known
+                known = current
+                for name in sorted(new_names):
+                    src = folder / name
+                    dst = _make_output_path(src, out_dir or folder, simplify_fraction, STP_EXT)
+                    src_kb2 = src.stat().st_size // BYTES_PER_KB
+                    size_str2 = f"{src_kb2:,} KB"
+                    _box_top()
+                    _box_row(f"[new]  {_trim(src.name, _BOX_CONTENT - len(size_str2) - 3)}", size_str2, lc=B, rc=DIM)
+                    _box_sep()
+                    _t0 = time.perf_counter()
+                    success2, info2 = convert(src, dst, args.tolerance, simplify_fraction,
+                                              step_schema=step_schema)
+                    _elapsed2 = time.perf_counter() - _t0
+                    _box_sep()
+                    if success2:
+                        out_str2 = f"{info2['kb']:,} KB · {_fmt_time(_elapsed2)}"
+                        _box_row(f"✓  {_trim(dst.name, _BOX_CONTENT - len(out_str2) - 3)}", out_str2, lc=f"{G}{B}", rc=G)
+                    else:
+                        _box_row(f"✗  {_err_line(info2)}", lc=R)
+                    _box_bot()
+                    print()
+        except KeyboardInterrupt:
+            print(f"\n  {DIM}Watch stopped.{X}\n")
+        sys.exit(0 if fail_n == 0 else 1)
     else:
-        _box_row(f"✗  {info.split(chr(10))[-1]}", lc=R)
-    _box_bot()
-    print()
-    if success:
-        print(f"  {G}{B}✓  Done{X}")
-    print()
-    input("  Press Enter to exit...")
-    sys.exit(0 if success else 1)
+        input("  Press Enter to exit...")
+        sys.exit(0 if fail_n == 0 else 1)
 
 
 if __name__ == "__main__":
