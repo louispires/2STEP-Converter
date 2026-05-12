@@ -104,13 +104,11 @@ DIM = '\033[2m'
 B   = '\033[1m'
 X   = '\033[0m'
 
-
-_quiet_active = threading.Event()
+_real_stdout_fd = os.dup(1)
 
 
 @contextmanager
 def quiet():
-    _quiet_active.set()
     sys.stdout.flush()
     sys.stderr.flush()
     fd1, fd2 = os.dup(1), os.dup(2)
@@ -129,7 +127,6 @@ def quiet():
         os.close(fd1)
         os.dup2(fd2, 2)
         os.close(fd2)
-        _quiet_active.clear()
 
 
 try:
@@ -514,10 +511,12 @@ def _step_start(label: str) -> float:
 
     def _tick():
         while not _timer_stop.wait(0.5):
-            if not _quiet_active.is_set():
-                t_str = _fmt_time(time.perf_counter() - _timer_t0[0])
-                print(f"\r  {DIM}│{X}  {DIM}{label:<{_BOX_LABEL}}{DIM}{t_str:>{_TIMER_PAD}}{X}\033[K",
-                      end="", flush=True)
+            t_str = _fmt_time(time.perf_counter() - _timer_t0[0])
+            line = f"\r  {DIM}│{X}  {DIM}{label:<{_BOX_LABEL}}{DIM}{t_str:>{_TIMER_PAD}}{X}\033[K"
+            try:
+                os.write(_real_stdout_fd, line.encode())
+            except Exception:
+                pass
 
     _timer_th[0] = threading.Thread(target=_tick, daemon=True)
     _timer_th[0].start()
