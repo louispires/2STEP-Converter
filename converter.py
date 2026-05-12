@@ -941,6 +941,8 @@ def convert(input_path: Path, output_path: Path, tolerance: float = DEFAULT_TOLE
 
         t = _step_start("writing")
         Interface_Static.SetCVal("write.step.schema", step_schema)
+        Interface_Static.SetCVal("write.step.product.name", "")
+        Interface_Static.SetCVal("write.step.assembly", "0")
         writer = STEPControl_Writer()
         with quiet():
             ts = writer.Transfer(refined, STEPControl_AsIs)
