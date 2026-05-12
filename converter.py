@@ -1037,11 +1037,12 @@ def _make_output_path(src: Path, base_dir: Path, fraction, ext: str) -> Path:
 def _run_batch(files, n, out_dir, args, simplify_fraction, step_schema, label_prefix=True):
     ok_n = fail_n = skip_n = 0
     _lock_frac = None
+    _locked = False
 
     for i, src_file in enumerate(files):
         base_dir = out_dir or src_file.parent
-        _is_interactive = SIMPLIFY_INTERACTIVE and not args.simplify and _lock_frac is None
-        eff_fraction = _lock_frac if _lock_frac is not None else simplify_fraction
+        _is_interactive = SIMPLIFY_INTERACTIVE and not args.simplify and not _locked
+        eff_fraction = _lock_frac if _locked else simplify_fraction
 
         src_kb = src_file.stat().st_size // BYTES_PER_KB
         size_str = f"{src_kb:,} KB"
@@ -1060,6 +1061,7 @@ def _run_batch(files, n, out_dir, args, simplify_fraction, step_schema, label_pr
             chosen_frac, lock_all = _simplify_prompt(eff_fraction, n_tris=n_tris_preview, batch=True)
             if lock_all:
                 _lock_frac = chosen_frac
+                _locked = True
             out_file = _make_output_path(src_file, base_dir, chosen_frac, STP_EXT)
             _up_to_date = (SKIP_EXISTING and not args.force
                            and out_file.exists()
