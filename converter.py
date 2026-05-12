@@ -4,6 +4,7 @@ import json
 import ctypes
 import traceback
 import argparse
+import subprocess
 import zipfile
 import struct
 import tempfile
@@ -81,6 +82,7 @@ try:
     with quiet():
         from OCC.Core.StlAPI import StlAPI_Reader
         from OCC.Core.BRep import BRep_Builder
+        from OCC.Core.BRepTools import breptools
         from OCC.Core.BRepBuilderAPI import BRepBuilderAPI_Sewing
         from OCC.Core.ShapeUpgrade import ShapeUpgrade_UnifySameDomain
         from OCC.Core.ShapeFix import ShapeFix_Shape
@@ -375,19 +377,6 @@ def _fix_shell(shell):
         return shell
 
 
-def _refine_shell(args):
-    shell, tolerance = args
-    try:
-        u = ShapeUpgrade_UnifySameDomain(shell, True, True, True)
-        u.SetLinearTolerance(tolerance)
-        u.SetAngularTolerance(ANGULAR_TOLERANCE)
-        u.Build()
-        result = u.Shape()
-        return result if not result.IsNull() else shell
-    except Exception:
-        return shell
-
-
 def _parallel_fix(shape):
     shells = _collect_shells(shape)
     n_threads = os.cpu_count() or 1
@@ -406,20 +395,47 @@ def _parallel_fix(shape):
 
 
 def _parallel_refine(shape, tolerance):
-    shells = _collect_shells(shape)
-    if len(shells) < 2:
-        try:
-            u = ShapeUpgrade_UnifySameDomain(shape, True, True, True)
-            u.SetLinearTolerance(tolerance)
-            u.SetAngularTolerance(ANGULAR_TOLERANCE)
-            u.Build()
-            result = u.Shape()
-            return result if not result.IsNull() else shape
-        except Exception:
-            return shape
-    results = [_refine_shell((s, tolerance)) for s in shells]
-    results = [r for r in results if r is not None and not r.IsNull()]
-    return _combine_shapes(results) if results else shape
+    fd_in,  in_path  = tempfile.mkstemp(suffix='.brep')
+    fd_out, out_path = tempfile.mkstemp(suffix='.brep')
+    os.close(fd_in)
+    os.close(fd_out)
+    in_fwd  = in_path.replace('\\', '/')
+    out_fwd = out_path.replace('\\', '/')
+    try:
+        breptools.Write(shape, in_fwd)
+        script = (
+            "from OCC.Core.BRepTools import breptools;"
+            "from OCC.Core.BRep import BRep_Builder;"
+            "from OCC.Core.TopoDS import TopoDS_Shape;"
+            "from OCC.Core.ShapeUpgrade import ShapeUpgrade_UnifySameDomain;"
+            "b=BRep_Builder();s=TopoDS_Shape();"
+            f"breptools.Read(s,'{in_fwd}',b);"
+            f"u=ShapeUpgrade_UnifySameDomain(s,True,True,True);"
+            f"u.SetLinearTolerance({tolerance});"
+            f"u.SetAngularTolerance({ANGULAR_TOLERANCE});"
+            "u.Build();"
+            "r=u.Shape();"
+            f"breptools.Write(r if not r.IsNull() else s,'{out_fwd}')"
+        )
+        proc = subprocess.run(
+            [sys.executable, '-c', script],
+            capture_output=True,
+            timeout=300,
+        )
+        if proc.returncode == 0 and os.path.getsize(out_path) > 0:
+            result = TopoDS_Shape()
+            breptools.Read(result, out_fwd, BRep_Builder())
+            if not result.IsNull():
+                return result
+    except Exception:
+        pass
+    finally:
+        for p in (in_path, out_path):
+            try:
+                os.unlink(p)
+            except Exception:
+                pass
+    return shape
 
 
 _step_open = [False]
