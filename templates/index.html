@@ -9,6 +9,37 @@
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
   <style>
     [x-cloak] { display: none !important; }
+
+    input[type="range"] {
+      -webkit-appearance: none;
+      appearance: none;
+      height: 4px;
+      border-radius: 2px;
+      background: #1e1e30;
+      outline: none;
+    }
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #7c3aed;
+      cursor: pointer;
+      transition: background 0.15s, transform 0.15s;
+    }
+    input[type="range"]::-webkit-slider-thumb:hover {
+      background: #8b5cf6;
+      transform: scale(1.2);
+    }
+    input[type="range"]::-moz-range-thumb {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #7c3aed;
+      cursor: pointer;
+      border: none;
+    }
   </style>
 </head>
 
@@ -23,18 +54,108 @@
         </svg>
       </div>
       <span class="font-semibold tracking-tight">2STEP Converter</span>
-      <div class="ml-auto flex items-center gap-2 text-xs text-slate-500">
-        <span class="bg-[#1e1e30] px-2 py-1 rounded-md">STL · 3MF · OBJ · AMF · IGES</span>
-        <svg class="w-3.5 h-3.5 text-slate-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M13 7l5 5m0 0l-5 5m5-5H6"/>
-        </svg>
-        <span class="bg-violet-950/60 text-violet-400 border border-violet-800/50 px-2 py-1 rounded-md">STEP</span>
+
+      <!-- Stats -->
+      <div class="ml-auto flex items-center gap-1.5 text-xs">
+        <template x-if="processingCount > 0">
+          <span class="flex items-center gap-1.5 bg-sky-950/60 text-sky-400 border border-sky-800/50 px-2.5 py-1 rounded-md">
+            <svg class="w-3 h-3 animate-spin flex-shrink-0" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-20" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+              <path class="opacity-80" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+            </svg>
+            <span x-text="processingCount + (processingCount === 1 ? ' converting' : ' converting')"></span>
+          </span>
+        </template>
+        <template x-if="doneCount > 0">
+          <span class="flex items-center gap-1 bg-emerald-950/60 text-emerald-400 border border-emerald-800/50 px-2.5 py-1 rounded-md">
+            <svg class="w-3 h-3 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/>
+            </svg>
+            <span x-text="doneCount + ' done'"></span>
+          </span>
+        </template>
+        <template x-if="failedCount > 0">
+          <span class="flex items-center gap-1 bg-red-950/60 text-red-400 border border-red-800/50 px-2.5 py-1 rounded-md">
+            <svg class="w-3 h-3 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
+            </svg>
+            <span x-text="failedCount + ' failed'"></span>
+          </span>
+        </template>
+        <template x-if="processingCount === 0 && doneCount === 0 && failedCount === 0">
+          <div class="flex items-center gap-2 text-slate-500">
+            <span class="bg-[#1e1e30] px-2 py-1 rounded-md">STL · 3MF · OBJ · AMF · IGES</span>
+            <svg class="w-3.5 h-3.5 text-slate-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M13 7l5 5m0 0l-5 5m5-5H6"/>
+            </svg>
+            <span class="bg-violet-950/60 text-violet-400 border border-violet-800/50 px-2 py-1 rounded-md">STEP</span>
+          </div>
+        </template>
       </div>
     </div>
   </header>
 
   <!-- Main -->
-  <main class="max-w-3xl mx-auto px-6 py-10">
+  <main class="max-w-3xl mx-auto px-6 py-8">
+
+    <!-- Settings Panel -->
+    <div class="mb-6 bg-[#13131f] border border-[#1e1e30] rounded-xl px-5 py-4">
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-5">
+
+        <!-- Sewing Tolerance -->
+        <div class="flex flex-col gap-2">
+          <div class="flex items-center justify-between">
+            <label class="text-xs text-slate-500">Sewing tolerance</label>
+            <span class="text-xs text-violet-400 font-mono" x-text="tolerance.toFixed(3)"></span>
+          </div>
+          <input
+            type="range"
+            min="0.001" max="0.5" step="0.001"
+            x-model.number="tolerance"
+            class="w-full"
+          >
+          <div class="flex justify-between text-[10px] text-slate-700">
+            <span>0.001</span>
+            <span>0.5</span>
+          </div>
+        </div>
+
+        <!-- Angular Tolerance -->
+        <div class="flex flex-col gap-2">
+          <div class="flex items-center justify-between">
+            <label class="text-xs text-slate-500">Angular tolerance</label>
+            <span class="text-xs text-violet-400 font-mono" x-text="angularTolerance.toFixed(3)"></span>
+          </div>
+          <input
+            type="range"
+            min="0.001" max="0.5" step="0.001"
+            x-model.number="angularTolerance"
+            class="w-full"
+          >
+          <div class="flex justify-between text-[10px] text-slate-700">
+            <span>0.001</span>
+            <span>0.5</span>
+          </div>
+        </div>
+
+        <!-- STEP Format -->
+        <div class="flex flex-col gap-2">
+          <label class="text-xs text-slate-500">Output format</label>
+          <select
+            x-model="format"
+            class="bg-[#0d0d14] border border-[#1e1e30] text-slate-300 text-sm rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-violet-600 cursor-pointer"
+          >
+            <option value="ap203">AP203 — default</option>
+            <option value="ap214">AP214 — colors</option>
+            <option value="ap242">AP242 — latest</option>
+          </select>
+          <p class="text-[10px] text-slate-700 leading-tight">
+            AP203 works in all CAD tools
+          </p>
+        </div>
+
+      </div>
+    </div>
 
     <!-- Drop Zone -->
     <div
@@ -150,7 +271,7 @@
               <!-- Error -->
               <div x-show="file.status === 'error'" class="flex items-center gap-1.5 text-red-400 text-xs">
                 <svg class="w-4 h-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                  <path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118z"/>
                 </svg>
                 <span class="truncate max-w-[80px]" :title="file.error" x-text="'Failed'"></span>
               </div>
@@ -168,6 +289,19 @@
       return {
         files: [],
         dragging: false,
+        tolerance: 0.01,
+        angularTolerance: 0.01,
+        format: 'ap203',
+
+        get processingCount() {
+          return this.files.filter(f => f.status === 'uploading' || f.status === 'processing').length;
+        },
+        get doneCount() {
+          return this.files.filter(f => f.status === 'done').length;
+        },
+        get failedCount() {
+          return this.files.filter(f => f.status === 'error').length;
+        },
 
         async init() {
           try {
@@ -212,9 +346,14 @@
 
         async upload(id, file) {
           try {
+            const params = new URLSearchParams({
+              tolerance: this.tolerance,
+              angular_tolerance: this.angularTolerance,
+              format: this.format,
+            });
             const form = new FormData();
             form.append('file', file);
-            const res = await fetch('/upload', { method: 'POST', body: form });
+            const res = await fetch(`/upload?${params}`, { method: 'POST', body: form });
             if (!res.ok) {
               const txt = await res.text();
               throw new Error(txt);

@@ -20,23 +20,22 @@ RUN apt-get update && \
     apt-get upgrade -y --no-install-recommends && \
     rm -rf /var/lib/apt/lists/*
 
-RUN mkdir -p /app/uploads /app/output && \
-    chown -R $MAMBA_USER:$MAMBA_USER /app
-
 USER $MAMBA_USER
 
 RUN micromamba install -y -n base -c conda-forge python=3.12 pythonocc-core pip && \
     micromamba clean -afy && \
     pip install --no-cache-dir fastapi "uvicorn[standard]" python-multipart jinja2 aiofiles
 
+USER root
+
 WORKDIR /app
 
-COPY --chown=$MAMBA_USER:$MAMBA_USER converter.py app.py entrypoint.sh ./
-COPY --chown=$MAMBA_USER:$MAMBA_USER templates/ templates/
-COPY --chown=$MAMBA_USER:$MAMBA_USER static/ static/
-COPY --chown=$MAMBA_USER:$MAMBA_USER --from=css-builder /build/static/styles.css static/styles.css
+COPY converter.py app.py entrypoint.sh ./
+COPY templates/ templates/
+COPY static/ static/
+COPY --from=css-builder /build/static/styles.css static/styles.css
 
-RUN chmod +x entrypoint.sh
+RUN chmod +x entrypoint.sh && mkdir -p /app/uploads /app/output /app/data
 
 EXPOSE 8000
 

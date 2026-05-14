@@ -8,7 +8,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -21,11 +21,15 @@ executor = ThreadPoolExecutor(max_workers=2)
 UPLOAD_DIR = Path("/app/uploads")
 OUTPUT_DIR = Path("/app/output")
 JOBS_FILE = Path("/app/output/jobs.json")
+_CONFIG_PATH = Path("/app/data/config.json")
 UPLOAD_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
+_CONFIG_PATH.parent.mkdir(exist_ok=True)
 
 _lock = threading.Lock()
+_config_lock = threading.Lock()
 ALLOWED = {".stl", ".3mf", ".obj", ".amf", ".igs", ".iges"}
+VALID_FORMATS = {"ap203", "ap214", "ap242"}
 
 
 def _load_jobs() -> dict:
@@ -46,15 +50,41 @@ def _save_jobs(jobs: dict) -> None:
 jobs: dict = _load_jobs()
 
 
+def _set_angular_tolerance(value: float) -> None:
+    cfg = {}
+    if _CONFIG_PATH.exists():
+        try:
+            cfg = json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    cfg["ANGULAR_TOLERANCE"] = value
+    _CONFIG_PATH.write_text(json.dumps(cfg, indent=4), encoding="utf-8")
+
+
 def _convert(job_id: str, input_path: Path, output_path: Path) -> None:
+    j = jobs[job_id]
+    tolerance = j.get("tolerance", 0.01)
+    angular_tolerance = j.get("angular_tolerance", 0.01)
+    step_format = j.get("format", "ap203")
+
     try:
-        result = subprocess.run(
-            ["python", "/app/converter.py", str(input_path), "--output", str(output_path), "--reduce", "0", "--no-preview"],
-            capture_output=True,
-            text=True,
-            timeout=300,
-            stdin=subprocess.DEVNULL,
-        )
+        with _config_lock:
+            _set_angular_tolerance(angular_tolerance)
+            result = subprocess.run(
+                [
+                    "python", "/app/converter.py",
+                    str(input_path),
+                    "--output", str(output_path),
+                    "--tolerance", str(tolerance),
+                    "--format", step_format,
+                    "--reduce", "0",
+                    "--no-preview",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=300,
+                stdin=subprocess.DEVNULL,
+            )
         # Script exits non-zero due to EOFError on "Press Enter to exit" prompt —
         # use output file existence as the success signal instead.
         if output_path.exists():
@@ -93,10 +123,17 @@ async def list_jobs():
 
 
 @app.post("/upload")
-async def upload(file: UploadFile = File(...)):
+async def upload(
+    file: UploadFile = File(...),
+    tolerance: float = Query(0.01, gt=0),
+    angular_tolerance: float = Query(0.01, gt=0),
+    format: str = Query("ap203"),
+):
     suffix = Path(file.filename).suffix.lower()
     if suffix not in ALLOWED:
         raise HTTPException(400, f"Unsupported format: {suffix}")
+
+    step_format = format if format in VALID_FORMATS else "ap203"
 
     job_id = str(uuid.uuid4())
     input_path = UPLOAD_DIR / f"{job_id}{suffix}"
@@ -112,6 +149,9 @@ async def upload(file: UploadFile = File(...)):
             "output": str(output_path),
             "error": None,
             "created_at": time.time(),
+            "tolerance": tolerance,
+            "angular_tolerance": angular_tolerance,
+            "format": step_format,
         }
         _save_jobs(jobs)
 
