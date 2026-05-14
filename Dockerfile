@@ -8,7 +8,8 @@ COPY static/input.css static/input.css
 
 RUN npm init -y && \
     npm install --save-dev tailwindcss@3 && \
-    npx tailwindcss -i static/input.css -o static/styles.css --minify
+    npx tailwindcss -i static/input.css -o static/styles.css --minify && \
+    test -s static/styles.css
 
 # Stage 2: Python app
 FROM mambaorg/micromamba:latest

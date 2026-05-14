@@ -3,5 +3,4 @@ lib/
 models/
 uploads/
 output/
-static/styles.css
 __pycache__/
