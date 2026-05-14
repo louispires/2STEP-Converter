@@ -4,7 +4,6 @@ setlocal EnableDelayedExpansion
 title 2STEP-Converter
 cd /d "%~dp0"
 
-
 if exist "%~dp0lib" (
     set _MM_ROOT=%~dp0lib
 ) else if exist "%LOCALAPPDATA%\STLtoSTP" (
@@ -77,12 +76,11 @@ if !_SZ! LSS 5000000 (
 if exist "!_PY!" goto :check_occ
 
 echo Setting up Python environment (one-time download, ~500 MB) ...
-"!_MM!" create --prefix "!_ENV!" -c conda-forge python=3.12 pythonocc-core --yes
+"!_MM!" create --prefix "!_ENV!" -c conda-forge python=3.12 pythonocc-core trimesh fast-simplification matplotlib open3d --yes
 if errorlevel 1 (
     echo [ERROR] Failed to create Python environment.
     pause & exit /b 1
 )
-goto :run
 
 :check_occ
 "!_PY!" -c "from OCC.Core.StlAPI import StlAPI_Reader" >nul 2>&1
@@ -95,6 +93,37 @@ if errorlevel 1 (
     )
 )
 
+:check_trimesh
+"!_PY!" -c "import trimesh" >nul 2>&1
+if errorlevel 1 (
+    echo Installing trimesh ...
+    "!_MM!" install --prefix "!_ENV!" -c conda-forge trimesh --yes
+    if errorlevel 1 ( "!_PY!" -m pip install trimesh )
+)
+
+:check_fast_simplification
+"!_PY!" -c "import fast_simplification" >nul 2>&1
+if errorlevel 1 (
+    echo Installing fast-simplification ...
+    "!_MM!" install --prefix "!_ENV!" -c conda-forge fast-simplification --yes
+    if errorlevel 1 ( "!_PY!" -m pip install fast-simplification )
+)
+
+:check_matplotlib
+"!_PY!" -c "import matplotlib" >nul 2>&1
+if errorlevel 1 (
+    echo Installing matplotlib ...
+    "!_MM!" install --prefix "!_ENV!" -c conda-forge matplotlib --yes
+    if errorlevel 1 ( "!_PY!" -m pip install matplotlib )
+)
+
+:check_open3d
+"!_PY!" -c "import open3d" >nul 2>&1
+if errorlevel 1 (
+    echo Installing open3d ...
+    "!_MM!" install --prefix "!_ENV!" -c conda-forge open3d --yes
+    if errorlevel 1 ( "!_PY!" -m pip install open3d )
+)
 
 :run
-"!_PY!" "%~dp02STEP-Converter.py" %*
+"!_PY!" "%~dp0converter.py" %*
