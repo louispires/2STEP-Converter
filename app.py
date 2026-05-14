@@ -49,7 +49,7 @@ jobs: dict = _load_jobs()
 def _convert(job_id: str, input_path: Path, output_path: Path) -> None:
     try:
         result = subprocess.run(
-            ["python", "/app/2STEP-Converter.py", str(input_path), str(output_path)],
+            ["python", "/app/converter.py", str(input_path), "--output", str(output_path), "--reduce", "0", "--no-preview"],
             capture_output=True,
             text=True,
             timeout=300,
